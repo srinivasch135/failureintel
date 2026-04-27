@@ -1,0 +1,57 @@
+spring:
+  application:
+    name: failureintel
+
+  datasource:
+    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5433/failureintel}
+    username: ${DB_USER:admin}
+    password: ${DB_PASSWORD:admin}
+    hikari:
+      maximum-pool-size: 10
+      minimum-idle: 2
+      idle-timeout: 30000
+      connection-timeout: 20000
+      max-lifetime: 1800000
+      pool-name: FailureIntelHikariCP
+
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    show-sql: false
+    properties:
+      hibernate:
+        format_sql: true
+        jdbc:
+          batch_size: 25
+        order_inserts: true
+        order_updates: true
+
+  flyway:
+    enabled: true
+    baseline-on-migrate: true
+    locations: classpath:db/migration
+
+logging:
+  level:
+    root: INFO
+    com.failureintel: DEBUG
+    org.springframework: INFO
+    org.hibernate.SQL: WARN
+
+  file:
+    name: logs/failureintel.log
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+
+  endpoint:
+    health:
+      show-details: when_authorized
+      show-components: always
+
+server:
+  port: ${SERVER_PORT:8081}
+  shutdown: graceful

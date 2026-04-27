@@ -1,0 +1,46 @@
+services:
+  postgres:
+    image: postgres:16-alpine # Alpine is smaller and more secure
+    container_name: failureintel-db
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d failureintel"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    env_file:
+      - .env
+    environment:
+      POSTGRES_DB: failureintel
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - failureintel-net
+    restart: unless-stopped
+
+  app:
+    build: .
+    container_name: failureintel-app
+    depends_on:
+      postgres:
+        condition: service_healthy 
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/failureintel
+      DB_USER: ${DB_USER}
+      DB_PASSWORD: ${DB_PASSWORD}
+    ports:
+      - "${SERVER_PORT:-8081}:8080"
+    networks:
+      - failureintel-net
+    restart: always
+
+networks:
+  failureintel-net:
+    driver: bridge
+
+volumes:
+  postgres-data:
