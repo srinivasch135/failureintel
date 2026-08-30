@@ -1,6 +1,7 @@
 package com.failureintel.ingestion.application.service;
 
 import com.failureintel.ingestion.api.dto.FailureEventIngestionRequest;
+import com.failureintel.ingestion.application.exception.DuplicateFailureEventException;
 import com.failureintel.ingestion.domain.normalization.NormalizationStatus;
 import com.failureintel.infrastructure.persistence.failureevent.entity.FailureEventEntity;
 import com.failureintel.infrastructure.persistence.failureevent.entity.ProcessingStatus;
@@ -13,6 +14,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.test.context.TestPropertySource;
 import org.testcontainers.utility.DockerImageName;
 import org.testcontainers.containers.PostgreSQLContainer;
@@ -23,6 +25,7 @@ import org.slf4j.LoggerFactory;
 import org.slf4j.Logger;
 
 import java.time.Instant;
+import java.sql.Timestamp;
 import java.util.Map;
 import java.util.UUID;
 import static org.junit.jupiter.api.Assertions.*;
@@ -151,8 +154,8 @@ class FailureEventPipelineIntegrationTest {
 
                 UUID originalEventId = toRepositoryId(ingestionService.ingestFailureEvent(firstRequest));
 
-                IllegalArgumentException exception = assertThrows(
-                                IllegalArgumentException.class,
+                DuplicateFailureEventException exception = assertThrows(
+                                DuplicateFailureEventException.class,
                                 () -> ingestionService.ingestFailureEvent(createValidRequest()));
 
                 assertEquals(
@@ -164,10 +167,44 @@ class FailureEventPipelineIntegrationTest {
                 assertTrue(normalizedFailureEventRepository.existsById(originalEventId));
         }
 
+        @Test
+        void shouldEnforceTrimmedTraceIdUniquenessInPostgreSql() {
+                FailureEventIngestionRequest firstRequest = createValidRequest();
+                firstRequest.setTraceId("trace-database-unique-001");
+                ingestionService.ingestFailureEvent(firstRequest);
+
+                assertThrows(
+                                DataIntegrityViolationException.class,
+                                () -> jdbcTemplate.update(
+                                                """
+                                                                INSERT INTO failure_event (
+                                                                    event_id,
+                                                                    occurred_at,
+                                                                    ingested_at,
+                                                                    service_name,
+                                                                    environment,
+                                                                    event_type,
+                                                                    trace_id,
+                                                                    processing_status
+                                                                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                                                                """,
+                                                UUID.randomUUID(),
+                                                Timestamp.from(Instant.parse("2026-08-03T20:00:00Z")),
+                                                Timestamp.from(Instant.parse("2026-08-03T20:00:01Z")),
+                                                "Payment-Service",
+                                                "PROD",
+                                                "ERROR",
+                                                "  trace-database-unique-001  ",
+                                                ProcessingStatus.NORMALIZED.name()));
+
+                assertEquals(1, failureEventRepository.count());
+                assertEquals(1, normalizedFailureEventRepository.count());
+        }
+
         public FailureEventIngestionRequest createValidRequest() {
                 FailureEventIngestionRequest request = new FailureEventIngestionRequest();
                 request.setServerName("datadog");
-                request.setServiceName("payment-service");
+                request.setServiceName("Payment-Service");
                 request.setEnvironment("PROD");
                 request.setEventType("ERROR");
                 request.setErrorType("PSQLException");
@@ -194,8 +231,12 @@ class FailureEventPipelineIntegrationTest {
                 assertNotNull(savedEvent);
 
                 assertEquals(
-                                "payment-service",
+                                "Payment-Service",
                                 savedEvent.getServiceName());
+
+                assertEquals(
+                                "datadog",
+                                savedEvent.getSourceSystem());
 
                 assertEquals(
                                 "trace-integration-001",
@@ -284,6 +325,7 @@ class FailureEventPipelineIntegrationTest {
                 Map<String, Object> row = jdbcTemplate.queryForMap(
                                 """
                                                 SELECT service_name,
+                                                       server_name,
                                                        environment,
                                                        event_type,
                                                        error_type,
@@ -298,7 +340,8 @@ class FailureEventPipelineIntegrationTest {
                                                 """,
                                 eventId);
 
-                assertEquals("payment-service", row.get("service_name"));
+                assertEquals("Payment-Service", row.get("service_name"));
+                assertEquals("datadog", row.get("server_name"));
                 assertEquals("PROD", row.get("environment"));
                 assertEquals("ERROR", row.get("event_type"));
                 assertEquals("PSQLException", row.get("error_type"));

@@ -1,6 +1,7 @@
 package com.failureintel.ingestion.application.service;
 
 import com.failureintel.ingestion.api.dto.FailureEventIngestionRequest;
+import com.failureintel.ingestion.application.exception.DuplicateFailureEventException;
 import com.failureintel.ingestion.application.useCase.IngestFailureEventUseCase;
 import com.failureintel.ingestion.domain.model.NormalizedFailureEvent;
 import com.failureintel.ingestion.domain.model.ParsedFailureEvent;
@@ -16,9 +17,11 @@ import com.failureintel.infrastructure.persistence.normalizedFailureEvent.reposi
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.sql.SQLException;
 import java.time.Instant;
 import java.util.Map;
 import java.util.UUID;
@@ -27,6 +30,7 @@ import java.util.UUID;
 public class FailureEventIngestionService implements IngestFailureEventUseCase {
 
         private static final Logger logger = LoggerFactory.getLogger(FailureEventIngestionService.class);
+        private static final String TRACE_ID_UNIQUE_INDEX = "uq_failure_event_trace_id";
 
         private final FailureEventRepository failureEventRepository;
         private final NormalizedFailureEventRepository normalizedFailureEventRepository;
@@ -48,20 +52,19 @@ public class FailureEventIngestionService implements IngestFailureEventUseCase {
         @Transactional
         public String ingestFailureEvent(FailureEventIngestionRequest request) {
 
-                if (request.getTraceId() != null && !request.getTraceId().isBlank()) {
-                        boolean duplicateExists = failureEventRepository.existsByTraceId(request.getTraceId());
+                RawFailureEvent rawFailureEvent = mapRequestToRawFailureEvent(request);
+
+                if (rawFailureEvent.getTraceId() != null) {
+                        boolean duplicateExists = failureEventRepository.existsByTraceId(rawFailureEvent.getTraceId());
 
                         if (duplicateExists) {
                                 logger.warn(
                                                 "Duplicate failure event detected for traceId={}",
-                                                request.getTraceId());
+                                                rawFailureEvent.getTraceId());
 
-                                throw new IllegalArgumentException(
-                                                "Failure event already exists for traceId: " + request.getTraceId());
+                                throw new DuplicateFailureEventException(rawFailureEvent.getTraceId());
                         }
                 }
-
-                RawFailureEvent rawFailureEvent = mapRequestToRawFailureEvent(request);
 
                 if (!failureEventParser.supports(rawFailureEvent)) {
                         logger.warn(
@@ -103,11 +106,9 @@ public class FailureEventIngestionService implements IngestFailureEventUseCase {
                                         "Event does not contain minimum useful failure data");
                 }
 
-                FailureEventEntity entity = FailureEventEntityMapper.fromDomain(
-                                rawFailureEvent,
-                                parsedFailureEvent);
+                FailureEventEntity entity = FailureEventEntityMapper.fromRaw(rawFailureEvent);
 
-                FailureEventEntity savedEntity = failureEventRepository.save(entity);
+                FailureEventEntity savedEntity = saveRawEntity(entity);
                 normalizedFailureEventRepository.save(
                                 NormalizedFailureEventEntityMapper.fromDomain(
                                                 normalizedFailureEvent,
@@ -130,7 +131,7 @@ public class FailureEventIngestionService implements IngestFailureEventUseCase {
                 FailureEventEntity failedEntity = FailureEventEntityMapper.failedFromRaw(
                                 rawFailureEvent,
                                 failureReason);
-                FailureEventEntity savedEntity = failureEventRepository.save(failedEntity);
+                FailureEventEntity savedEntity = saveRawEntity(failedEntity);
 
                 logger.info(
                                 "Saved failed failure event. eventId={} sourceSystem={} processingStatus={} reason={}",
@@ -140,6 +141,34 @@ public class FailureEventIngestionService implements IngestFailureEventUseCase {
                                 failureReason);
 
                 return savedEntity.getEventId().toString();
+        }
+
+        private FailureEventEntity saveRawEntity(FailureEventEntity entity) {
+                try {
+                        return failureEventRepository.saveAndFlush(entity);
+                } catch (DataIntegrityViolationException exception) {
+                        if (entity.getTraceId() != null && isTraceIdUniqueViolation(exception)) {
+                                throw new DuplicateFailureEventException(entity.getTraceId());
+                        }
+                        throw exception;
+                }
+        }
+
+        private boolean isTraceIdUniqueViolation(Throwable failure) {
+                Throwable current = failure;
+                while (current != null) {
+                        if (current instanceof SQLException sqlException
+                                        && "23505".equals(sqlException.getSQLState())
+                                        && containsTraceIdIndex(sqlException.getMessage())) {
+                                return true;
+                        }
+                        current = current.getCause();
+                }
+                return false;
+        }
+
+        private boolean containsTraceIdIndex(String message) {
+                return message != null && message.contains(TRACE_ID_UNIQUE_INDEX);
         }
 
         private RawFailureEvent mapRequestToRawFailureEvent(
@@ -153,11 +182,18 @@ public class FailureEventIngestionService implements IngestFailureEventUseCase {
                                 request.getErrorType(),
                                 request.getErrorMessage(),
                                 request.getDependencyTarget(),
-                                request.getTraceId(),
+                                normalizeTraceId(request.getTraceId()),
                                 request.getSeverityHint(),
                                 request.getOccurredAt(),
                                 Instant.now(),
                                 request.getRawPayload() != null ? request.getRawPayload() : Map.of(),
                                 Map.of());
+        }
+
+        private String normalizeTraceId(String traceId) {
+                if (traceId == null || traceId.isBlank()) {
+                        return null;
+                }
+                return traceId.trim();
         }
 }

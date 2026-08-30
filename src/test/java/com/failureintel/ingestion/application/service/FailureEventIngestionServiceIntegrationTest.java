@@ -75,6 +75,11 @@ class FailureEventIngestionServiceIntegrationTest {
 
         assertEquals(eventId, savedEvent.getEventId().toString());
 
+        assertEquals("checkout-api", savedEvent.getSourceSystem());
+        assertEquals("Payment-Service", savedEvent.getServiceName());
+        assertEquals("production", savedEvent.getEnvironment());
+        assertEquals("ERROR", savedEvent.getEventType());
+
         assertNotNull(savedEvent.getRawPayload());
         assertTrue(savedEvent.getRawPayload().contains("\"message\":\"Connection timed out\""));
 

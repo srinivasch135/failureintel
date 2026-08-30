@@ -20,6 +20,8 @@ public class FailureEventEntity {
     private Instant ingestedAt;
     @Column(name = "service_name", nullable = false, length = 120)
     private String serviceName;
+    @Column(name = "server_name", length = 255)
+    private String sourceSystem;
     @Column(name = "environment", nullable = false, length = 50)
     private String environment;
     @Column(name = "event_type", nullable = false, length = 80)
@@ -84,6 +86,14 @@ public class FailureEventEntity {
 
     public void setServiceName(String serviceName) {
         this.serviceName = serviceName;
+    }
+
+    public String getSourceSystem() {
+        return sourceSystem;
+    }
+
+    public void setSourceSystem(String sourceSystem) {
+        this.sourceSystem = sourceSystem;
     }
 
     public String getEnvironment() {

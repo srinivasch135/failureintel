@@ -1,7 +1,9 @@
 package com.failureintel.ingestion.api;
 
 import com.failureintel.infrastructure.web.exception.GlobalExceptionHandler;
+import com.failureintel.ingestion.api.dto.FailureEventIngestionRequest;
 import com.failureintel.ingestion.api.dto.FailureEventResponse;
+import com.failureintel.ingestion.application.exception.DuplicateFailureEventException;
 import com.failureintel.ingestion.application.exception.FailureEventNotFoundException;
 import com.failureintel.ingestion.application.service.FailureEventQueryService;
 import com.failureintel.ingestion.application.useCase.IngestFailureEventUseCase;
@@ -24,17 +26,20 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
+import static org.springframework.http.MediaType.APPLICATION_JSON;
 
 class FailureEventControllerTest {
 
     private FailureEventQueryService failureEventQueryService;
+    private IngestFailureEventUseCase ingestFailureEventUseCase;
     private MockMvc mockMvc;
 
     @BeforeEach
     void setUp() {
-        IngestFailureEventUseCase ingestFailureEventUseCase = mock(IngestFailureEventUseCase.class);
+        ingestFailureEventUseCase = mock(IngestFailureEventUseCase.class);
         failureEventQueryService = mock(FailureEventQueryService.class);
 
         FailureEventController controller = new FailureEventController(
@@ -45,6 +50,31 @@ class FailureEventControllerTest {
                 .setControllerAdvice(new GlobalExceptionHandler())
                 .setCustomArgumentResolvers(new PageableHandlerMethodArgumentResolver())
                 .build();
+    }
+
+    @Test
+    void shouldReturnConflictForDuplicateTraceId() throws Exception {
+        when(ingestFailureEventUseCase.ingestFailureEvent(isA(FailureEventIngestionRequest.class)))
+                .thenThrow(new DuplicateFailureEventException("trace-duplicate-001"));
+
+        mockMvc.perform(post("/api/v1/failure-events")
+                .contentType(APPLICATION_JSON)
+                .content("""
+                        {
+                          "occurredAt": "2026-08-24T10:15:30Z",
+                          "serviceName": "payment-service",
+                          "serverName": "datadog",
+                          "environment": "prod",
+                          "eventType": "error",
+                          "errorMessage": "Connection timeout",
+                          "traceId": "trace-duplicate-001",
+                          "rawPayload": {"message": "Connection timeout"}
+                        }
+                        """))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.error").value("DUPLICATE_FAILURE_EVENT"))
+                .andExpect(jsonPath("$.message")
+                        .value("Failure event already exists for traceId: trace-duplicate-001"));
     }
 
     @Test

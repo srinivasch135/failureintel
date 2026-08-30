@@ -1,5 +1,6 @@
 package com.failureintel.infrastructure.web.exception;
 
+import com.failureintel.ingestion.application.exception.DuplicateFailureEventException;
 import com.failureintel.ingestion.application.exception.FailureEventNotFoundException;
 import jakarta.servlet.http.HttpServletRequest;
 
@@ -21,6 +22,22 @@ import org.springframework.web.HttpRequestMethodNotSupportedException;
 public class GlobalExceptionHandler {
 
         private static final Logger log = LoggerFactory.getLogger(GlobalExceptionHandler.class);
+
+        @ExceptionHandler(DuplicateFailureEventException.class)
+        public ResponseEntity<ApiErrorResponse> handleDuplicateFailureEventException(
+                        DuplicateFailureEventException ex,
+                        HttpServletRequest request) {
+
+                log.warn("DUPLICATE_FAILURE_EVENT | {} | Path: {} | Method: {}",
+                                ex.getMessage(),
+                                request.getRequestURI(),
+                                request.getMethod());
+
+                return build(HttpStatus.CONFLICT,
+                                "DUPLICATE_FAILURE_EVENT",
+                                ex.getMessage(),
+                                request);
+        }
 
         @ExceptionHandler(FailureEventNotFoundException.class)
         public ResponseEntity<ApiErrorResponse> handleFailureEventNotFoundException(

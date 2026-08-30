@@ -2,14 +2,12 @@ package com.failureintel.infrastructure.persistence.failureevent.mapper;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.failureintel.ingestion.domain.model.ParsedFailureEvent;
 import com.failureintel.ingestion.domain.model.RawFailureEvent;
 import com.failureintel.infrastructure.persistence.failureevent.entity.FailureEventEntity;
 import com.failureintel.infrastructure.persistence.failureevent.entity.ProcessingStatus;
 
 import java.util.Map;
 import java.util.Objects;
-import java.util.UUID;
 
 public final class FailureEventEntityMapper {
 
@@ -18,27 +16,10 @@ public final class FailureEventEntityMapper {
     private FailureEventEntityMapper() {
     }
 
-    public static FailureEventEntity fromDomain(
-            RawFailureEvent rawFailureEvent,
-            ParsedFailureEvent parsedFailureEvent) {
+    public static FailureEventEntity fromRaw(RawFailureEvent rawFailureEvent) {
         Objects.requireNonNull(rawFailureEvent, "rawFailureEvent must not be null");
-        Objects.requireNonNull(parsedFailureEvent, "parsedFailureEvent must not be null");
 
-        FailureEventEntity entity = new FailureEventEntity();
-
-        entity.setEventId(rawFailureEvent.getRawEventId());
-        entity.setRawPayload(toJson(rawFailureEvent.getRawPayload()));
-        entity.setOccurredAt(rawFailureEvent.getOccuredAt());
-        entity.setIngestedAt(rawFailureEvent.getReceivedAt());
-
-        entity.setServiceName(parsedFailureEvent.getServiceName());
-        entity.setEnvironment(parsedFailureEvent.getEnvironment());
-        entity.setEventType(parsedFailureEvent.getEventType());
-        entity.setErrorType(parsedFailureEvent.getErrorType());
-        entity.setMessage(parsedFailureEvent.getErrorMessage());
-        entity.setDependencyTarget(parsedFailureEvent.getDependencyTarget());
-        entity.setTraceId(parsedFailureEvent.getTraceId());
-        entity.setSeverityHint(parsedFailureEvent.getSeverityHint());
+        FailureEventEntity entity = mapRawFields(rawFailureEvent);
         entity.setProcessingStatus(ProcessingStatus.NORMALIZED);
 
         return entity;
@@ -49,13 +30,17 @@ public final class FailureEventEntityMapper {
             String failureReason) {
         Objects.requireNonNull(rawFailureEvent, "rawFailureEvent must not be null");
 
+        FailureEventEntity entity = mapRawFields(rawFailureEvent);
+        entity.setFailureReason(failureReason);
+        entity.setProcessingStatus(ProcessingStatus.FAILED);
+
+        return entity;
+    }
+
+    private static FailureEventEntity mapRawFields(RawFailureEvent rawFailureEvent) {
         FailureEventEntity entity = new FailureEventEntity();
-
-        entity.setEventId(UUID.randomUUID());
-        entity.setRawPayload(toJson(rawFailureEvent.getRawPayload()));
-        entity.setOccurredAt(rawFailureEvent.getOccuredAt());
-        entity.setIngestedAt(rawFailureEvent.getReceivedAt());
-
+        entity.setEventId(rawFailureEvent.getRawEventId());
+        entity.setSourceSystem(rawFailureEvent.getSourceSystem());
         entity.setServiceName(rawFailureEvent.getServiceName());
         entity.setEnvironment(rawFailureEvent.getEnvironment());
         entity.setEventType(rawFailureEvent.getEventType());
@@ -64,9 +49,9 @@ public final class FailureEventEntityMapper {
         entity.setDependencyTarget(rawFailureEvent.getDependencyTarget());
         entity.setTraceId(rawFailureEvent.getTraceId());
         entity.setSeverityHint(rawFailureEvent.getSeverityHint());
-        entity.setFailureReason(failureReason);
-        entity.setProcessingStatus(ProcessingStatus.FAILED);
-
+        entity.setOccurredAt(rawFailureEvent.getOccuredAt());
+        entity.setIngestedAt(rawFailureEvent.getReceivedAt());
+        entity.setRawPayload(toJson(rawFailureEvent.getRawPayload()));
         return entity;
     }
 
