@@ -70,7 +70,7 @@ class FailureEventIngestionServiceTest {
     }
 
     @Test
-    void shouldTrimTraceIdBeforeDuplicateCheckAndPersistence() {
+    void shouldTrimTraceIdBeforePersistence() {
         FailureEventIngestionService service = new FailureEventIngestionService(
                 failureEventRepository,
                 normalizedFailureEventRepository,
@@ -83,7 +83,6 @@ class FailureEventIngestionServiceTest {
         service.ingestFailureEvent(validRequest("  trace-trimmed-001  "));
 
         ArgumentCaptor<FailureEventEntity> captor = ArgumentCaptor.forClass(FailureEventEntity.class);
-        verify(failureEventRepository).existsByTraceId("trace-trimmed-001");
         verify(failureEventRepository).saveAndFlush(captor.capture());
         assertEquals("trace-trimmed-001", captor.getValue().getTraceId());
     }

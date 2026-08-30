@@ -54,18 +54,6 @@ public class FailureEventIngestionService implements IngestFailureEventUseCase {
 
                 RawFailureEvent rawFailureEvent = mapRequestToRawFailureEvent(request);
 
-                if (rawFailureEvent.getTraceId() != null) {
-                        boolean duplicateExists = failureEventRepository.existsByTraceId(rawFailureEvent.getTraceId());
-
-                        if (duplicateExists) {
-                                logger.warn(
-                                                "Duplicate failure event detected for traceId={}",
-                                                rawFailureEvent.getTraceId());
-
-                                throw new DuplicateFailureEventException(rawFailureEvent.getTraceId());
-                        }
-                }
-
                 if (!failureEventParser.supports(rawFailureEvent)) {
                         logger.warn(
                                         "Unsupported failure event received. Saving as failed. sourceSystem={} serviceName={} eventType={}",
