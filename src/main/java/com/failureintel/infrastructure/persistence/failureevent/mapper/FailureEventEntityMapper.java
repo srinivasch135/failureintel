@@ -26,7 +26,7 @@ public final class FailureEventEntityMapper {
 
         FailureEventEntity entity = new FailureEventEntity();
 
-        entity.setEventId(UUID.randomUUID());
+        entity.setEventId(rawFailureEvent.getRawEventId());
         entity.setRawPayload(toJson(rawFailureEvent.getRawPayload()));
         entity.setOccurredAt(rawFailureEvent.getOccuredAt());
         entity.setIngestedAt(rawFailureEvent.getReceivedAt());
