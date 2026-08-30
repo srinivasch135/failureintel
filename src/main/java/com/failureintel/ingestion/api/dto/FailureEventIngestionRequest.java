@@ -2,9 +2,14 @@ package com.failureintel.ingestion.api.dto;
 
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
+import lombok.AllArgsConstructor;
+import lombok.NoArgsConstructor;
+
 import java.time.Instant;
 import java.util.Map;
 
+@AllArgsConstructor
+@NoArgsConstructor
 public class FailureEventIngestionRequest {
     @NotNull(message = "Occurred at is required")
     private Instant occurredAt;
@@ -55,6 +60,14 @@ public class FailureEventIngestionRequest {
 
     public void setServerName(String serverName) {
         this.serverName = serverName;
+    }
+
+    public String getSourceSystem() {
+        return serverName;
+    }
+
+    public void setSourceSystem(String sourceSystem) {
+        this.serverName = sourceSystem;
     }
 
     public String getEnvironment() {

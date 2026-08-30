@@ -1,0 +1,8 @@
+CREATE INDEX idx_normalized_failure_event_service_env_time
+ON normalized_failure_event (normalized_service_name, normalized_environment, normalized_occurred_at DESC);
+
+CREATE INDEX idx_normalized_failure_event_status_time
+ON normalized_failure_event (normalization_status, normalized_at DESC);
+
+CREATE INDEX idx_normalized_failure_event_type_time
+ON normalized_failure_event (normalized_event_type, normalized_occurred_at DESC);

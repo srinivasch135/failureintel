@@ -1,5 +1,6 @@
 package com.failureintel.infrastructure.web.exception;
 
+import com.failureintel.ingestion.application.exception.FailureEventNotFoundException;
 import jakarta.servlet.http.HttpServletRequest;
 
 import java.time.Instant;
@@ -20,6 +21,22 @@ import org.springframework.web.HttpRequestMethodNotSupportedException;
 public class GlobalExceptionHandler {
 
         private static final Logger log = LoggerFactory.getLogger(GlobalExceptionHandler.class);
+
+        @ExceptionHandler(FailureEventNotFoundException.class)
+        public ResponseEntity<ApiErrorResponse> handleFailureEventNotFoundException(
+                        FailureEventNotFoundException ex,
+                        HttpServletRequest request) {
+
+                log.warn("FAILURE_EVENT_NOT_FOUND | {} | Path: {} | Method: {}",
+                                ex.getMessage(),
+                                request.getRequestURI(),
+                                request.getMethod());
+
+                return build(HttpStatus.NOT_FOUND,
+                                "FAILURE_EVENT_NOT_FOUND",
+                                ex.getMessage(),
+                                request);
+        }
 
         @ExceptionHandler(DataAccessException.class)
         public ResponseEntity<ApiErrorResponse> handleDataAccessException(
