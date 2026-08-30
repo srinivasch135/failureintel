@@ -1,16 +1,12 @@
-package com.failureintel.infrastructure.persistence;
+package com.failureintel.infrastructure.persistence.failureevent.entity;
 
 import jakarta.persistence.*;
 
-import java.beans.BeanProperty;
-import java.lang.annotation.Inherited;
 import java.time.Instant;
 import java.util.UUID;
 
-import javax.annotation.processing.Generated;
-
 @Entity
-@Table(name = "failure_events")
+@Table(name = "failure_event")
 public class FailureEventEntity {
 
     @Id
@@ -18,12 +14,14 @@ public class FailureEventEntity {
     private UUID eventId;
     @Column(name = "occurred_at", nullable = false)
     private Instant occurredAt;
-    @Column(name = "failure_type", nullable = false)
+    @Column(name = "failure_type")
     private String failureType;
     @Column(name = "ingested_at", nullable = false, updatable = false)
     private Instant ingestedAt;
     @Column(name = "service_name", nullable = false, length = 120)
     private String serviceName;
+    @Column(name = "server_name", length = 255)
+    private String sourceSystem;
     @Column(name = "environment", nullable = false, length = 50)
     private String environment;
     @Column(name = "event_type", nullable = false, length = 80)
@@ -40,11 +38,11 @@ public class FailureEventEntity {
     private String severityHint;
     @Column(name = "raw_payload", columnDefinition = "TEXT")
     private String rawPayload;
-    @Column(name = "normalized_payload", columnDefinition = "TEXT")
-    private String normalizedPayload;
-    @Enumerated(EnumType.STRING)
     @Column(name = "processing_status", nullable = false, length = 20)
+    @Enumerated(EnumType.STRING)
     private ProcessingStatus processingStatus;
+    @Column(name = "failure_reason", columnDefinition = "TEXT")
+    private String failureReason;
     @Column(name = "incident_id")
     private UUID incidentId;
 
@@ -88,6 +86,14 @@ public class FailureEventEntity {
 
     public void setServiceName(String serviceName) {
         this.serviceName = serviceName;
+    }
+
+    public String getSourceSystem() {
+        return sourceSystem;
+    }
+
+    public void setSourceSystem(String sourceSystem) {
+        this.sourceSystem = sourceSystem;
     }
 
     public String getEnvironment() {
@@ -154,20 +160,20 @@ public class FailureEventEntity {
         this.rawPayload = rawPayload;
     }
 
-    public String getNormalizedPayload() {
-        return normalizedPayload;
-    }
-
-    public void setNormalizedPayload(String normalizedPayload) {
-        this.normalizedPayload = normalizedPayload;
-    }
-
     public ProcessingStatus getProcessingStatus() {
         return processingStatus;
     }
 
     public void setProcessingStatus(ProcessingStatus processingStatus) {
         this.processingStatus = processingStatus;
+    }
+
+    public String getFailureReason() {
+        return failureReason;
+    }
+
+    public void setFailureReason(String failureReason) {
+        this.failureReason = failureReason;
     }
 
     public UUID getIncidentId() {

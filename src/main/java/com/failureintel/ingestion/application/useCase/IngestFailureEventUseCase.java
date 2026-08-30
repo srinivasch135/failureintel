@@ -1,4 +1,4 @@
-package com.failureintel.ingestion.application;
+package com.failureintel.ingestion.application.useCase;
 
 import com.failureintel.ingestion.api.dto.FailureEventIngestionRequest;
 

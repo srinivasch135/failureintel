@@ -28,8 +28,8 @@ spring:
 
   flyway:
     enabled: true
-    baseline-on-migrate: true
-    locations: classpath:db/migration
+    out-of-order: false
+    validate-on-migrate: true
 
 logging:
   level:
@@ -37,10 +37,6 @@ logging:
     com.failureintel: DEBUG
     org.springframework: INFO
     org.hibernate.SQL: WARN
-
-  file:
-    name: logs/failureintel.log
-
 management:
   endpoints:
     web:
