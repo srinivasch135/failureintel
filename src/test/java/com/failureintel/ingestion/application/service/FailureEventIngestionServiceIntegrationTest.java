@@ -100,4 +100,39 @@ class FailureEventIngestionServiceIntegrationTest {
         assertNotNull(normalizedEntity.getNormalizationMetadata());
         assertEquals(NormalizationStatus.FULLY_NORMALIZED, normalizedEntity.getNormalizationStatus());
     }
+
+    @Test
+    void shouldPersistWorkerMetadataAndApplyRawEventDefaults() {
+        UUID eventId = UUID.randomUUID();
+        Instant occurredAt = Instant.parse("2026-09-05T12:00:00Z");
+        Instant ingestedAt = Instant.parse("2026-09-05T12:00:05Z");
+        Map<String, Object> sourceMetadata = Map.of(
+                "collector", "datadog",
+                "region", "us-east-1");
+
+        FailureEventEntity event = new FailureEventEntity();
+        event.setEventId(eventId);
+        event.setOccurredAt(occurredAt);
+        event.setIngestedAt(ingestedAt);
+        event.setSourceSystem("datadog");
+        event.setServiceName("payment-service");
+        event.setEnvironment("prod");
+        event.setEventType("error");
+        event.setRawPayload("{}");
+        event.setSourceMetadata(sourceMetadata);
+
+        failureEventRepository.saveAndFlush(event);
+
+        FailureEventEntity persisted = failureEventRepository.findById(eventId).orElseThrow();
+
+        assertEquals(ProcessingStatus.RECEIVED, persisted.getProcessingStatus());
+        assertEquals(0, persisted.getAttemptCount());
+        assertEquals(sourceMetadata, persisted.getSourceMetadata());
+        assertEquals(occurredAt, persisted.getOccurredAt());
+        assertEquals(ingestedAt, persisted.getIngestedAt());
+        assertNull(persisted.getLastAttemptAt());
+        assertNull(persisted.getNextAttemptAt());
+        assertNull(persisted.getProcessingStartedAt());
+        assertNull(persisted.getFailureCode());
+    }
 }

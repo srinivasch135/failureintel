@@ -52,6 +52,7 @@ public final class FailureEventEntityMapper {
         entity.setOccurredAt(rawFailureEvent.getOccuredAt());
         entity.setIngestedAt(rawFailureEvent.getReceivedAt());
         entity.setRawPayload(toJson(rawFailureEvent.getRawPayload()));
+        entity.setSourceMetadata(rawFailureEvent.getMetaData());
         return entity;
     }
 

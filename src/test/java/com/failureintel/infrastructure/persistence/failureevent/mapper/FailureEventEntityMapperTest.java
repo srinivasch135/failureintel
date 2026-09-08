@@ -17,6 +17,9 @@ class FailureEventEntityMapperTest {
 
     @Test
     void shouldPreserveRawIdentityAndReceivedValues() {
+        Map<String, Object> sourceMetadata = Map.of(
+                "region", "us-east-1",
+                "collector", "datadog");
         RawFailureEvent rawEvent = rawEvent(
                 "Payment-Service",
                 "PRODUCTION",
@@ -28,7 +31,7 @@ class FailureEventEntityMapperTest {
                 "SEV2",
                 OCCURRED_AT,
                 Map.of("environment", "payload-environment"),
-                Map.of());
+                sourceMetadata);
 
         FailureEventEntity entity = FailureEventEntityMapper.fromRaw(rawEvent);
 
@@ -45,6 +48,7 @@ class FailureEventEntityMapperTest {
         assertEquals(OCCURRED_AT, entity.getOccurredAt());
         assertEquals(RECEIVED_AT, entity.getIngestedAt());
         assertTrue(entity.getRawPayload().contains("payload-environment"));
+        assertEquals(sourceMetadata, entity.getSourceMetadata());
         assertEquals(ProcessingStatus.NORMALIZED, entity.getProcessingStatus());
     }
 

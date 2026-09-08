@@ -1,6 +1,10 @@
 package com.failureintel.infrastructure.persistence.failureevent.entity;
 
 import jakarta.persistence.*;
+import org.hibernate.annotations.JdbcTypeCode;
+import org.hibernate.type.SqlTypes;
+
+import java.util.Map;
 
 import java.time.Instant;
 import java.util.UUID;
@@ -41,6 +45,19 @@ public class FailureEventEntity {
     @Column(name = "processing_status", nullable = false, length = 20)
     @Enumerated(EnumType.STRING)
     private ProcessingStatus processingStatus;
+    @JdbcTypeCode(SqlTypes.JSON)
+    @Column(name = "source_metadata", columnDefinition = "jsonb")
+    private Map<String, Object> sourceMetadata;
+    @Column(name = "attempt_count", nullable = false)
+    private Integer attemptCount;
+    @Column(name = "last_attempt_at")
+    private Instant lastAttemptAt;
+    @Column(name = "next_attempt_at")
+    private Instant nextAttemptAt;
+    @Column(name = "processing_started_at")
+    private Instant processingStartedAt;
+    @Column(name = "failure_code", length = 80)
+    private String failureCode;
     @Column(name = "failure_reason", columnDefinition = "TEXT")
     private String failureReason;
     @Column(name = "incident_id")
@@ -53,6 +70,9 @@ public class FailureEventEntity {
         }
         if (this.processingStatus == null) {
             this.processingStatus = ProcessingStatus.RECEIVED;
+        }
+        if (this.attemptCount == null) {
+            this.attemptCount = 0;
         }
     }
 
@@ -182,6 +202,54 @@ public class FailureEventEntity {
 
     public void setIncidentId(UUID incidentId) {
         this.incidentId = incidentId;
+    }
+
+    public Map<String, Object> getSourceMetadata() {
+        return sourceMetadata;
+    }
+
+    public void setSourceMetadata(Map<String, Object> sourceMetadata) {
+        this.sourceMetadata = sourceMetadata;
+    }
+
+    public Integer getAttemptCount() {
+        return attemptCount;
+    }
+
+    public void setAttemptCount(Integer attemptCount) {
+        this.attemptCount = attemptCount;
+    }
+
+    public Instant getLastAttemptAt() {
+        return lastAttemptAt;
+    }
+
+    public void setLastAttemptAt(Instant lastAttemptAt) {
+        this.lastAttemptAt = lastAttemptAt;
+    }
+
+    public Instant getNextAttemptAt() {
+        return nextAttemptAt;
+    }
+
+    public void setNextAttemptAt(Instant nextAttemptAt) {
+        this.nextAttemptAt = nextAttemptAt;
+    }
+
+    public Instant getProcessingStartedAt() {
+        return processingStartedAt;
+    }
+
+    public void setProcessingStartedAt(Instant processingStartedAt) {
+        this.processingStartedAt = processingStartedAt;
+    }
+
+    public String getFailureCode() {
+        return failureCode;
+    }
+
+    public void setFailureCode(String failureCode) {
+        this.failureCode = failureCode;
     }
 
 }
