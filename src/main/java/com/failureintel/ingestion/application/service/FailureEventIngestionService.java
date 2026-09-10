@@ -10,6 +10,7 @@ import com.failureintel.ingestion.domain.normalization.FailureEventNormalizer;
 import com.failureintel.ingestion.domain.normalization.NormalizationStatus;
 import com.failureintel.ingestion.domain.parser.FailureEventParser;
 import com.failureintel.infrastructure.persistence.failureevent.entity.FailureEventEntity;
+import com.failureintel.infrastructure.persistence.failureevent.entity.ProcessingStatus;
 import com.failureintel.infrastructure.persistence.failureevent.mapper.FailureEventEntityMapper;
 import com.failureintel.infrastructure.persistence.failureevent.repository.FailureEventRepository;
 import com.failureintel.infrastructure.persistence.normalizedFailureEvent.mapper.NormalizedFailureEventEntityMapper;
@@ -95,6 +96,8 @@ public class FailureEventIngestionService implements IngestFailureEventUseCase {
                 }
 
                 FailureEventEntity entity = FailureEventEntityMapper.fromRaw(rawFailureEvent);
+                // Preserve the current synchronous flow until asynchronous processing is introduced.
+                entity.setProcessingStatus(ProcessingStatus.NORMALIZED);
 
                 FailureEventEntity savedEntity = saveRawEntity(entity);
                 normalizedFailureEventRepository.save(

@@ -49,7 +49,47 @@ class FailureEventEntityMapperTest {
         assertEquals(RECEIVED_AT, entity.getIngestedAt());
         assertTrue(entity.getRawPayload().contains("payload-environment"));
         assertEquals(sourceMetadata, entity.getSourceMetadata());
-        assertEquals(ProcessingStatus.NORMALIZED, entity.getProcessingStatus());
+        assertEquals(ProcessingStatus.RECEIVED, entity.getProcessingStatus());
+    }
+
+    @Test
+    void shouldRoundTripRawFailureEventWithoutChangingValues() {
+        Map<String, Object> payload = Map.of(
+                "Environment", "Payload-Environment",
+                "nested", Map.of("attempt", 3));
+        Map<String, Object> metadata = Map.of(
+                "collector", "datadog",
+                "region", "us-east-1");
+        RawFailureEvent original = rawEvent(
+                "Payment-Service",
+                "PRODUCTION",
+                "ERROR",
+                "postgres_exception",
+                "Connection timeout",
+                "payment-database",
+                "trace-raw-roundtrip-001",
+                "SEV2",
+                OCCURRED_AT,
+                payload,
+                metadata);
+
+        FailureEventEntity entity = FailureEventEntityMapper.fromRaw(original);
+        RawFailureEvent reconstructed = FailureEventEntityMapper.toRaw(entity);
+
+        assertEquals(original.getRawEventId(), reconstructed.getRawEventId());
+        assertEquals(original.getSourceSystem(), reconstructed.getSourceSystem());
+        assertEquals(original.getServiceName(), reconstructed.getServiceName());
+        assertEquals(original.getEnvironment(), reconstructed.getEnvironment());
+        assertEquals(original.getEventType(), reconstructed.getEventType());
+        assertEquals(original.getErrorType(), reconstructed.getErrorType());
+        assertEquals(original.getErrorMessage(), reconstructed.getErrorMessage());
+        assertEquals(original.getDependencyTarget(), reconstructed.getDependencyTarget());
+        assertEquals(original.getTraceId(), reconstructed.getTraceId());
+        assertEquals(original.getSeverityHint(), reconstructed.getSeverityHint());
+        assertEquals(original.getOccurredAt(), reconstructed.getOccurredAt());
+        assertEquals(original.getReceivedAt(), reconstructed.getReceivedAt());
+        assertEquals(original.getRawPayload(), reconstructed.getRawPayload());
+        assertEquals(original.getMetaData(), reconstructed.getMetaData());
     }
 
     @Test
