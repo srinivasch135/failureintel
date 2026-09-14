@@ -9,6 +9,7 @@ import com.failureintel.ingestion.application.service.FailureEventQueryService;
 import com.failureintel.ingestion.application.useCase.IngestFailureEventUseCase;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import org.springframework.data.domain.PageImpl;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
@@ -66,6 +67,24 @@ class FailureEventControllerTest {
                 .andExpect(jsonPath("$.eventId").value(eventId.toString()))
                 .andExpect(jsonPath("$.status").value("RECEIVED"))
                 .andExpect(jsonPath("$.message").value("Failure event accepted for processing"));
+    }
+
+    @Test
+    void shouldForwardIdempotencyKeyHeaderToIngestionUseCase() throws Exception {
+        UUID eventId = UUID.randomUUID();
+        when(ingestFailureEventUseCase.ingestFailureEvent(isA(FailureEventIngestionRequest.class)))
+                .thenReturn(eventId.toString());
+
+        mockMvc.perform(post("/api/v1/failure-events")
+                        .contentType(APPLICATION_JSON)
+                        .header("Idempotency-Key", "event-header-001")
+                        .content(validIngestionRequest("trace-header-001")))
+                .andExpect(status().isAccepted());
+
+        ArgumentCaptor<FailureEventIngestionRequest> captor =
+                ArgumentCaptor.forClass(FailureEventIngestionRequest.class);
+        verify(ingestFailureEventUseCase).ingestFailureEvent(captor.capture());
+        org.junit.jupiter.api.Assertions.assertEquals("event-header-001", captor.getValue().getIdempotencyKey());
     }
 
     @Test

@@ -84,7 +84,7 @@ class FailureEventControllerIntegrationTest {
                 .andExpect(jsonPath("$.message").value("Failure event accepted for processing"));
 
         FailureEventEntity persisted = failureEventRepository
-                .findByTraceId("trace-controller-001")
+                .findFirstByTraceIdOrderByIngestedAtDescEventIdDesc("trace-controller-001")
                 .orElseThrow();
 
         assertEquals(ProcessingStatus.RECEIVED, persisted.getProcessingStatus());

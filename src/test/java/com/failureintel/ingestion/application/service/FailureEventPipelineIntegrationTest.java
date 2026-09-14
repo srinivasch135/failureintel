@@ -26,6 +26,12 @@ import java.time.Instant;
 import java.sql.Timestamp;
 import java.util.Map;
 import java.util.UUID;
+import java.util.List;
+import java.util.concurrent.Callable;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import static org.junit.jupiter.api.Assertions.*;
 
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
@@ -134,18 +140,14 @@ class FailureEventPipelineIntegrationTest {
         }
 
         @Test
-        void shouldRejectDuplicateTraceIdWithoutCreatingAdditionalRows() {
+        void shouldReturnExistingEventForEquivalentLegacyTraceRetry() {
                 FailureEventIngestionRequest firstRequest = createValidRequest();
 
                 UUID originalEventId = toRepositoryId(ingestionService.ingestFailureEvent(firstRequest));
 
-                DuplicateFailureEventException exception = assertThrows(
-                                DuplicateFailureEventException.class,
-                                () -> ingestionService.ingestFailureEvent(createValidRequest()));
+                UUID retriedEventId = toRepositoryId(ingestionService.ingestFailureEvent(createValidRequest()));
 
-                assertEquals(
-                                "Failure event already exists for traceId: trace-integration-001",
-                                exception.getMessage());
+                assertEquals(originalEventId, retriedEventId);
                 assertEquals(1, failureEventRepository.count());
                 assertEquals(0, normalizedFailureEventRepository.count());
                 assertTrue(failureEventRepository.existsById(originalEventId));
@@ -153,9 +155,68 @@ class FailureEventPipelineIntegrationTest {
         }
 
         @Test
-        void shouldEnforceTrimmedTraceIdUniquenessInPostgreSql() {
+        void shouldAllowDistinctExplicitIdempotencyKeysForEventsWithSameTraceId() {
+                FailureEventIngestionRequest firstRequest = createValidRequest();
+                firstRequest.setIdempotencyKey("event-001");
+                FailureEventIngestionRequest secondRequest = createValidRequest();
+                secondRequest.setIdempotencyKey("event-002");
+
+                UUID firstEventId = toRepositoryId(ingestionService.ingestFailureEvent(firstRequest));
+                UUID secondEventId = toRepositoryId(ingestionService.ingestFailureEvent(secondRequest));
+
+                assertNotEquals(firstEventId, secondEventId);
+                assertEquals(2, failureEventRepository.count());
+                assertEquals(2, failureEventRepository.findAll().stream()
+                                .map(FailureEventEntity::getTraceId)
+                                .filter("trace-integration-001"::equals)
+                                .count());
+        }
+
+        @Test
+        void shouldReturnOneEventIdForConcurrentEquivalentRequests() throws Exception {
+                FailureEventIngestionRequest firstRequest = createValidRequest();
+                firstRequest.setIdempotencyKey("event-concurrent-001");
+
+                ExecutorService executor = Executors.newFixedThreadPool(2);
+                CountDownLatch ready = new CountDownLatch(2);
+                Callable<String> ingest = () -> {
+                        ready.countDown();
+                        ready.await();
+                        return ingestionService.ingestFailureEvent(firstRequest);
+                };
+                try {
+                        List<Future<String>> results = executor.invokeAll(List.of(ingest, ingest));
+                        String firstEventId = results.get(0).get();
+                        String secondEventId = results.get(1).get();
+
+                        assertEquals(firstEventId, secondEventId);
+                        assertEquals(1, failureEventRepository.count());
+                } finally {
+                        executor.shutdownNow();
+                }
+        }
+
+        @Test
+        void shouldRejectSameExplicitIdempotencyKeyWhenContentDiffers() {
+                FailureEventIngestionRequest firstRequest = createValidRequest();
+                firstRequest.setIdempotencyKey("event-conflict-001");
+                ingestionService.ingestFailureEvent(firstRequest);
+
+                FailureEventIngestionRequest conflictingRequest = createValidRequest();
+                conflictingRequest.setIdempotencyKey("event-conflict-001");
+                conflictingRequest.setErrorMessage("Different failure content");
+
+                assertThrows(
+                                DuplicateFailureEventException.class,
+                                () -> ingestionService.ingestFailureEvent(conflictingRequest));
+                assertEquals(1, failureEventRepository.count());
+        }
+
+        @Test
+        void shouldEnforceIdempotencyKeyUniquenessInPostgreSql() {
                 FailureEventIngestionRequest firstRequest = createValidRequest();
                 firstRequest.setTraceId("trace-database-unique-001");
+                firstRequest.setIdempotencyKey("database-unique-001");
                 ingestionService.ingestFailureEvent(firstRequest);
 
                 assertThrows(
@@ -170,8 +231,9 @@ class FailureEventPipelineIntegrationTest {
                                                                     environment,
                                                                     event_type,
                                                                     trace_id,
+                                                                    idempotency_key,
                                                                     processing_status
-                                                                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                                                                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                                                                 """,
                                                 UUID.randomUUID(),
                                                 Timestamp.from(Instant.parse("2026-08-03T20:00:00Z")),
@@ -179,7 +241,8 @@ class FailureEventPipelineIntegrationTest {
                                                 "Payment-Service",
                                                 "PROD",
                                                 "ERROR",
-                                                "  trace-database-unique-001  ",
+                                                "trace-other-001",
+                                                "key:database-unique-001",
                                                 ProcessingStatus.RECEIVED.name()));
 
                 assertEquals(1, failureEventRepository.count());

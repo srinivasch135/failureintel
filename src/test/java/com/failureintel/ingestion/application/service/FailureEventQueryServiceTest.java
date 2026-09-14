@@ -91,7 +91,8 @@ class FailureEventQueryServiceTest {
         String traceId = "raw-trace";
         FailureEventEntity rawEvent = rawEvent(eventId);
         NormalizedFailureEventEntity normalizedEvent = normalizedEvent(eventId);
-        when(failureEventRepository.findByTraceId(traceId)).thenReturn(Optional.of(rawEvent));
+        when(failureEventRepository.findFirstByTraceIdOrderByIngestedAtDescEventIdDesc(traceId))
+                .thenReturn(Optional.of(rawEvent));
         when(normalizedFailureEventRepository.findById(eventId)).thenReturn(Optional.of(normalizedEvent));
 
         FailureEventResponse response = queryService.getFailureEventByTraceId(traceId);
@@ -99,21 +100,22 @@ class FailureEventQueryServiceTest {
         assertEquals(eventId, response.eventId());
         assertEquals("raw-trace", response.traceId());
         assertEquals("normalized-service", response.serviceName());
-        verify(failureEventRepository).findByTraceId(traceId);
+        verify(failureEventRepository).findFirstByTraceIdOrderByIngestedAtDescEventIdDesc(traceId);
         verify(normalizedFailureEventRepository).findById(eventId);
     }
 
     @Test
     void shouldThrowWhenTraceIdDoesNotExist() {
         String traceId = "missing-trace";
-        when(failureEventRepository.findByTraceId(traceId)).thenReturn(Optional.empty());
+        when(failureEventRepository.findFirstByTraceIdOrderByIngestedAtDescEventIdDesc(traceId))
+                .thenReturn(Optional.empty());
 
         FailureEventNotFoundException exception = assertThrows(
                 FailureEventNotFoundException.class,
                 () -> queryService.getFailureEventByTraceId(traceId));
 
         assertEquals("FailureEvent not found for traceId: " + traceId, exception.getMessage());
-        verify(failureEventRepository).findByTraceId(traceId);
+        verify(failureEventRepository).findFirstByTraceIdOrderByIngestedAtDescEventIdDesc(traceId);
         verifyNoInteractions(normalizedFailureEventRepository);
     }
 

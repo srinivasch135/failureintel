@@ -3,7 +3,9 @@ package com.failureintel.ingestion.application.service;
 import com.failureintel.ingestion.application.exception.DuplicateFailureEventException;
 import com.failureintel.infrastructure.persistence.failureevent.entity.FailureEventEntity;
 import com.failureintel.infrastructure.persistence.failureevent.entity.ProcessingStatus;
+import com.failureintel.infrastructure.persistence.failureevent.mapper.FailureEventEntityMapper;
 import com.failureintel.infrastructure.persistence.failureevent.repository.FailureEventRepository;
+import com.failureintel.ingestion.domain.model.RawFailureEvent;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
@@ -12,6 +14,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.dao.DataIntegrityViolationException;
 
 import java.sql.SQLException;
+import java.util.Optional;
 
 import static com.failureintel.test.support.FailureEventTestFixtures.validRequest;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -74,20 +77,72 @@ class FailureEventIngestionServiceTest {
     }
 
     @Test
-    void shouldTranslateConcurrentTraceIdConstraintViolation() {
+    void shouldResolveConcurrentEquivalentIdempotencyKeyViolation() {
         FailureEventIngestionService service = new FailureEventIngestionService(failureEventRepository);
+        var request = validRequest("trace-race-001");
+        request.setIdempotencyKey("idempotency-race-001");
+        var existingRaw = new RawFailureEvent(
+                java.util.UUID.randomUUID(),
+                request.getServerName(),
+                request.getServiceName(),
+                request.getEnvironment(),
+                request.getEventType(),
+                request.getErrorType(),
+                request.getErrorMessage(),
+                request.getDependencyTarget(),
+                request.getTraceId(),
+                request.getSeverityHint(),
+                request.getOccurredAt(),
+                java.time.Instant.now(),
+                request.getRawPayload(),
+                java.util.Map.of());
+        FailureEventEntity existing = FailureEventEntityMapper.fromRaw(existingRaw);
+        existing.setIdempotencyKey("key:idempotency-race-001");
+        existing.setIngestionFingerprint(FailureEventFingerprint.calculate(existingRaw));
+        when(failureEventRepository.findByIdempotencyKey("key:idempotency-race-001"))
+                .thenReturn(Optional.empty())
+                .thenReturn(Optional.of(existing));
         SQLException uniqueViolation = new SQLException(
-                "duplicate key violates unique constraint uq_failure_event_trace_id",
+                "duplicate key violates unique constraint uq_failure_event_idempotency_key",
                 "23505");
         when(failureEventRepository.saveAndFlush(any(FailureEventEntity.class)))
                 .thenThrow(new DataIntegrityViolationException("duplicate trace ID", uniqueViolation));
 
+        assertEquals(existing.getEventId().toString(), service.ingestFailureEvent(request));
+    }
+
+    @Test
+    void shouldRejectExplicitIdempotencyKeyWhenContentDiffers() {
+        FailureEventIngestionService service = new FailureEventIngestionService(failureEventRepository);
+        var request = validRequest("trace-conflict-001");
+        request.setIdempotencyKey("idempotency-conflict-001");
+        FailureEventEntity existing = FailureEventEntityMapper.fromRaw(new RawFailureEvent(
+                java.util.UUID.randomUUID(),
+                request.getServerName(),
+                request.getServiceName(),
+                request.getEnvironment(),
+                request.getEventType(),
+                request.getErrorType(),
+                "different message",
+                request.getDependencyTarget(),
+                request.getTraceId(),
+                request.getSeverityHint(),
+                request.getOccurredAt(),
+                java.time.Instant.now(),
+                request.getRawPayload(),
+                java.util.Map.of()));
+        existing.setIdempotencyKey("key:idempotency-conflict-001");
+        existing.setIngestionFingerprint(FailureEventFingerprint.calculate(
+                FailureEventEntityMapper.toRaw(existing)));
+        when(failureEventRepository.findByIdempotencyKey("key:idempotency-conflict-001"))
+                .thenReturn(Optional.of(existing));
+
         DuplicateFailureEventException exception = assertThrows(
                 DuplicateFailureEventException.class,
-                () -> service.ingestFailureEvent(validRequest("trace-race-001")));
+                () -> service.ingestFailureEvent(request));
 
         assertEquals(
-                "Failure event already exists for traceId: trace-race-001",
+                "Failure event already exists for idempotency key: idempotency-conflict-001",
                 exception.getMessage());
     }
 }
