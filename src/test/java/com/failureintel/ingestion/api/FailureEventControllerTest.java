@@ -12,6 +12,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.data.domain.PageImpl;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
+import org.springframework.dao.DataAccessResourceFailureException;
 import org.springframework.data.web.PageableHandlerMethodArgumentResolver;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
@@ -50,6 +51,33 @@ class FailureEventControllerTest {
                 .setControllerAdvice(new GlobalExceptionHandler())
                 .setCustomArgumentResolvers(new PageableHandlerMethodArgumentResolver())
                 .build();
+    }
+
+    @Test
+    void shouldReturnAcceptedReceivedResponseAfterCapture() throws Exception {
+        UUID eventId = UUID.randomUUID();
+        when(ingestFailureEventUseCase.ingestFailureEvent(isA(FailureEventIngestionRequest.class)))
+                .thenReturn(eventId.toString());
+
+        mockMvc.perform(post("/api/v1/failure-events")
+                .contentType(APPLICATION_JSON)
+                .content(validIngestionRequest("trace-capture-001")))
+                .andExpect(status().isAccepted())
+                .andExpect(jsonPath("$.eventId").value(eventId.toString()))
+                .andExpect(jsonPath("$.status").value("RECEIVED"))
+                .andExpect(jsonPath("$.message").value("Failure event accepted for processing"));
+    }
+
+    @Test
+    void shouldNotReturnAcceptedWhenRawCaptureFails() throws Exception {
+        when(ingestFailureEventUseCase.ingestFailureEvent(isA(FailureEventIngestionRequest.class)))
+                .thenThrow(new DataAccessResourceFailureException("database unavailable"));
+
+        mockMvc.perform(post("/api/v1/failure-events")
+                .contentType(APPLICATION_JSON)
+                .content(validIngestionRequest("trace-capture-failure-001")))
+                .andExpect(status().isInternalServerError())
+                .andExpect(jsonPath("$.error").value("DATABASE_ERROR"));
     }
 
     @Test
@@ -197,5 +225,20 @@ class FailureEventControllerTest {
                 eq("prod"),
                 eq("HIGH"),
                 isA(Pageable.class));
+    }
+
+    private String validIngestionRequest(String traceId) {
+        return """
+                {
+                  "occurredAt": "2026-08-24T10:15:30Z",
+                  "serviceName": "payment-service",
+                  "serverName": "datadog",
+                  "environment": "prod",
+                  "eventType": "error",
+                  "errorMessage": "Connection timeout",
+                  "traceId": "%s",
+                  "rawPayload": {"message": "Connection timeout"}
+                }
+                """.formatted(traceId);
     }
 }

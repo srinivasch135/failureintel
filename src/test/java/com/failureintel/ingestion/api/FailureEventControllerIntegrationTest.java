@@ -1,8 +1,13 @@
 package com.failureintel.ingestion.api;
 
 import com.failureintel.infrastructure.persistence.failureevent.repository.FailureEventRepository;
+import com.failureintel.infrastructure.persistence.failureevent.entity.FailureEventEntity;
+import com.failureintel.infrastructure.persistence.failureevent.entity.ProcessingStatus;
+import com.failureintel.infrastructure.persistence.normalizedFailureEvent.entity.NormalizedFailureEventEntity;
+import com.failureintel.infrastructure.persistence.normalizedFailureEvent.repository.NormalizedFailureEventRepository;
 import com.failureintel.ingestion.api.dto.FailureEventIngestionRequest;
 import com.failureintel.ingestion.application.service.FailureEventIngestionService;
+import com.failureintel.ingestion.domain.normalization.NormalizationStatus;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.slf4j.Logger;
@@ -21,6 +26,7 @@ import org.testcontainers.utility.DockerImageName;
 
 import java.time.Instant;
 import java.util.Map;
+import java.util.UUID;
 
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
@@ -28,6 +34,8 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 import static org.springframework.http.MediaType.APPLICATION_JSON;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @AutoConfigureMockMvc
@@ -57,9 +65,32 @@ class FailureEventControllerIntegrationTest {
     @Autowired
     private FailureEventRepository failureEventRepository;
 
+    @Autowired
+    private NormalizedFailureEventRepository normalizedFailureEventRepository;
+
     @AfterEach
     void cleanUp() {
+        normalizedFailureEventRepository.deleteAll();
         failureEventRepository.deleteAll();
+    }
+
+    @Test
+    void shouldAcceptAndDurablyCaptureRawFailureEvent() throws Exception {
+        mockMvc.perform(post("/api/v1/failure-events")
+                        .contentType(APPLICATION_JSON)
+                        .content(validRequestJson()))
+                .andExpect(status().isAccepted())
+                .andExpect(jsonPath("$.status").value("RECEIVED"))
+                .andExpect(jsonPath("$.message").value("Failure event accepted for processing"));
+
+        FailureEventEntity persisted = failureEventRepository
+                .findByTraceId("trace-controller-001")
+                .orElseThrow();
+
+        assertEquals(ProcessingStatus.RECEIVED, persisted.getProcessingStatus());
+        assertEquals(0, persisted.getAttemptCount());
+        assertNull(persisted.getFailureReason());
+        assertFalse(normalizedFailureEventRepository.existsById(persisted.getEventId()));
     }
 
     @Test
@@ -70,14 +101,14 @@ class FailureEventControllerIntegrationTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.eventId").value(eventId))
                 .andExpect(jsonPath("$.traceId").value("trace-controller-001"))
-                .andExpect(jsonPath("$.processingStatus").value("NORMALIZED"))
-                .andExpect(jsonPath("$.serviceName").value("payment-service"))
-                .andExpect(jsonPath("$.environment").value("prod"))
-                .andExpect(jsonPath("$.eventType").value("exception"))
+                .andExpect(jsonPath("$.processingStatus").value("RECEIVED"))
+                .andExpect(jsonPath("$.serviceName").value("Payment-Service"))
+                .andExpect(jsonPath("$.environment").value("production"))
+                .andExpect(jsonPath("$.eventType").value("ERROR"))
                 .andExpect(jsonPath("$.errorType").value("PSQLException"))
                 .andExpect(jsonPath("$.message").value("Connection timeout after 5000ms"))
                 .andExpect(jsonPath("$.dependencyTarget").value("payment-database"))
-                .andExpect(jsonPath("$.severity").value("high"))
+                .andExpect(jsonPath("$.severity").value("HIGH"))
                 .andExpect(jsonPath("$.occurredAt").value("2026-08-03T20:00:00Z"));
     }
 
@@ -95,9 +126,9 @@ class FailureEventControllerIntegrationTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.eventId").value(eventId))
                 .andExpect(jsonPath("$.traceId").value("trace-controller-001"))
-                .andExpect(jsonPath("$.serviceName").value("payment-service"))
-                .andExpect(jsonPath("$.environment").value("prod"))
-                .andExpect(jsonPath("$.severity").value("high"));
+                .andExpect(jsonPath("$.serviceName").value("Payment-Service"))
+                .andExpect(jsonPath("$.environment").value("production"))
+                .andExpect(jsonPath("$.severity").value("HIGH"));
     }
 
     @Test
@@ -109,6 +140,7 @@ class FailureEventControllerIntegrationTest {
     @Test
     void shouldSearchFailureEventsByNormalizedFieldsFromDatabase() throws Exception {
         String eventId = ingestionService.ingestFailureEvent(validRequest());
+        persistNormalizedSearchFixture(UUID.fromString(eventId));
 
         mockMvc.perform(get("/api/v1/failure-events/search")
                 .param("serviceName", "payment-service")
@@ -161,5 +193,53 @@ class FailureEventControllerIntegrationTest {
                 "host", "payment-prod-01",
                 "region", "us-east-1"));
         return request;
+    }
+
+    private String validRequestJson() {
+        return """
+                {
+                  "serverName": "datadog",
+                  "serviceName": "Payment-Service",
+                  "environment": "production",
+                  "eventType": "ERROR",
+                  "errorType": "PSQLException",
+                  "errorMessage": "Connection timeout after 5000ms",
+                  "dependencyTarget": "payment-database",
+                  "traceId": "trace-controller-001",
+                  "severityHint": "HIGH",
+                  "occurredAt": "2026-08-03T20:00:00Z",
+                  "rawPayload": {
+                    "host": "payment-prod-01",
+                    "region": "us-east-1"
+                  }
+                }
+                """;
+    }
+
+    private void persistNormalizedSearchFixture(UUID eventId) {
+        FailureEventEntity rawEvent = failureEventRepository.findById(eventId).orElseThrow();
+        Instant processingStartedAt = Instant.parse("2026-08-03T20:00:01Z");
+        rawEvent.claimForProcessing(processingStartedAt);
+        rawEvent.markNormalized();
+        failureEventRepository.saveAndFlush(rawEvent);
+
+        NormalizedFailureEventEntity normalizedEvent = new NormalizedFailureEventEntity();
+        normalizedEvent.setFailureEvent(rawEvent);
+        normalizedEvent.setNormalizedPayload(Map.of(
+                "host", "payment-prod-01",
+                "region", "us-east-1"));
+        normalizedEvent.setNormalizedServiceName("payment-service");
+        normalizedEvent.setNormalizedEnvironment("prod");
+        normalizedEvent.setNormalizedEventType("exception");
+        normalizedEvent.setNormalizedErrorType("PSQLException");
+        normalizedEvent.setNormalizedErrorMessage("Connection timeout after 5000ms");
+        normalizedEvent.setNormalizedDependencyTarget("payment-database");
+        normalizedEvent.setNormalizedTraceId("trace-controller-001");
+        normalizedEvent.setNormalizedSeverity("high");
+        normalizedEvent.setNormalizedOccurredAt(Instant.parse("2026-08-03T20:00:00Z"));
+        normalizedEvent.setNormalizationStatus(NormalizationStatus.FULLY_NORMALIZED);
+        normalizedEvent.setNormalizationMetadata(Map.of());
+        normalizedEvent.setNormalizedAt(Instant.parse("2026-08-03T20:00:02Z"));
+        normalizedFailureEventRepository.saveAndFlush(normalizedEvent);
     }
 }

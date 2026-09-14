@@ -1,13 +1,9 @@
 package com.failureintel.ingestion.application.service;
 
 import com.failureintel.ingestion.application.exception.DuplicateFailureEventException;
-import com.failureintel.ingestion.domain.model.RawFailureEvent;
-import com.failureintel.ingestion.domain.normalization.FailureEventNormalizer;
-import com.failureintel.ingestion.domain.parser.FailureEventParser;
 import com.failureintel.infrastructure.persistence.failureevent.entity.FailureEventEntity;
 import com.failureintel.infrastructure.persistence.failureevent.entity.ProcessingStatus;
 import com.failureintel.infrastructure.persistence.failureevent.repository.FailureEventRepository;
-import com.failureintel.infrastructure.persistence.normalizedFailureEvent.repository.NormalizedFailureEventRepository;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
@@ -31,52 +27,28 @@ class FailureEventIngestionServiceTest {
     @Mock
     private FailureEventRepository failureEventRepository;
 
-    @Mock
-    private NormalizedFailureEventRepository normalizedFailureEventRepository;
-
-    @Mock
-    private FailureEventParser parser;
-
-    @Mock
-    private FailureEventNormalizer normalizer;
-
     @Test
-    void shouldPersistParserFailureAsFailedRawEventWithoutNormalizedRow() {
-        FailureEventIngestionService service = new FailureEventIngestionService(
-                failureEventRepository,
-                normalizedFailureEventRepository,
-                parser,
-                normalizer);
-        when(parser.supports(any(RawFailureEvent.class))).thenReturn(true);
-        when(parser.parse(any(RawFailureEvent.class)))
-                .thenThrow(new IllegalArgumentException("invalid source format"));
+    void shouldPersistRawFailureEventAsReceived() {
+        FailureEventIngestionService service = new FailureEventIngestionService(failureEventRepository);
         when(failureEventRepository.saveAndFlush(any(FailureEventEntity.class)))
                 .thenAnswer(invocation -> invocation.getArgument(0));
 
-        String eventId = service.ingestFailureEvent(validRequest("trace-parser-failure-001"));
+        String eventId = service.ingestFailureEvent(validRequest("trace-capture-001"));
 
         ArgumentCaptor<FailureEventEntity> captor = ArgumentCaptor.forClass(FailureEventEntity.class);
         verify(failureEventRepository).saveAndFlush(captor.capture());
-        verifyNoInteractions(normalizedFailureEventRepository);
-        verifyNoInteractions(normalizer);
 
-        FailureEventEntity failedEvent = captor.getValue();
+        FailureEventEntity rawEvent = captor.getValue();
         assertNotNull(eventId);
-        assertEquals(failedEvent.getEventId().toString(), eventId);
-        assertEquals(ProcessingStatus.FAILED, failedEvent.getProcessingStatus());
-        assertEquals(
-                "Parsing/normalization failed: invalid source format",
-                failedEvent.getFailureReason());
+        assertEquals(rawEvent.getEventId().toString(), eventId);
+        assertEquals(ProcessingStatus.RECEIVED, rawEvent.getProcessingStatus());
+        assertEquals("trace-capture-001", rawEvent.getTraceId());
+        assertNull(rawEvent.getFailureReason());
     }
 
     @Test
     void shouldTrimTraceIdBeforePersistence() {
-        FailureEventIngestionService service = new FailureEventIngestionService(
-                failureEventRepository,
-                normalizedFailureEventRepository,
-                parser,
-                normalizer);
-        when(parser.supports(any(RawFailureEvent.class))).thenReturn(false);
+        FailureEventIngestionService service = new FailureEventIngestionService(failureEventRepository);
         when(failureEventRepository.saveAndFlush(any(FailureEventEntity.class)))
                 .thenAnswer(invocation -> invocation.getArgument(0));
 
@@ -89,12 +61,7 @@ class FailureEventIngestionServiceTest {
 
     @Test
     void shouldStoreBlankTraceIdAsNullAndSkipDuplicateCheck() {
-        FailureEventIngestionService service = new FailureEventIngestionService(
-                failureEventRepository,
-                normalizedFailureEventRepository,
-                parser,
-                normalizer);
-        when(parser.supports(any(RawFailureEvent.class))).thenReturn(false);
+        FailureEventIngestionService service = new FailureEventIngestionService(failureEventRepository);
         when(failureEventRepository.saveAndFlush(any(FailureEventEntity.class)))
                 .thenAnswer(invocation -> invocation.getArgument(0));
 
@@ -108,12 +75,7 @@ class FailureEventIngestionServiceTest {
 
     @Test
     void shouldTranslateConcurrentTraceIdConstraintViolation() {
-        FailureEventIngestionService service = new FailureEventIngestionService(
-                failureEventRepository,
-                normalizedFailureEventRepository,
-                parser,
-                normalizer);
-        when(parser.supports(any(RawFailureEvent.class))).thenReturn(false);
+        FailureEventIngestionService service = new FailureEventIngestionService(failureEventRepository);
         SQLException uniqueViolation = new SQLException(
                 "duplicate key violates unique constraint uq_failure_event_trace_id",
                 "23505");

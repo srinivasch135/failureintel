@@ -27,8 +27,8 @@ import java.util.UUID;
 @RequestMapping(path = "/api/v1/failure-events", produces = MediaType.APPLICATION_JSON_VALUE)
 public class FailureEventController {
     private static final Logger logger = LoggerFactory.getLogger(FailureEventController.class);
-    private static final String ACCEPTED_STATUS = "ACCEPTED";
-    private static final String ACCEPTED_MESSAGE = "Failure event accepted";
+    private static final String ACCEPTED_STATUS = "RECEIVED";
+    private static final String ACCEPTED_MESSAGE = "Failure event accepted for processing";
 
     private final IngestFailureEventUseCase ingestFailureEventUseCase;
     private final FailureEventQueryService failureEventQueryService;

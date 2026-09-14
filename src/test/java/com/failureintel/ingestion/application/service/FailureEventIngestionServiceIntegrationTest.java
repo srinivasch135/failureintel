@@ -2,12 +2,10 @@ package com.failureintel.ingestion.application.service;
 
 import com.failureintel.ingestion.api.dto.FailureEventIngestionRequest;
 import com.failureintel.ingestion.domain.model.RawFailureEvent;
-import com.failureintel.ingestion.domain.normalization.NormalizationStatus;
 import com.failureintel.infrastructure.persistence.failureevent.entity.FailureEventEntity;
 import com.failureintel.infrastructure.persistence.failureevent.entity.ProcessingStatus;
 import com.failureintel.infrastructure.persistence.failureevent.mapper.FailureEventEntityMapper;
 import com.failureintel.infrastructure.persistence.failureevent.repository.FailureEventRepository;
-import com.failureintel.infrastructure.persistence.normalizedFailureEvent.entity.NormalizedFailureEventEntity;
 import com.failureintel.infrastructure.persistence.normalizedFailureEvent.repository.NormalizedFailureEventRepository;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -55,7 +53,7 @@ class FailureEventIngestionServiceIntegrationTest {
     }
 
     @Test
-    void shouldIngestNormalizeAndPersistFailureEvent() {
+    void shouldCaptureRawFailureEventAsReceived() {
         Instant occurredAt = Instant.parse("2026-06-18T12:00:00Z");
 
         FailureEventIngestionRequest request = new FailureEventIngestionRequest();
@@ -87,22 +85,14 @@ class FailureEventIngestionServiceIntegrationTest {
         assertNotNull(savedEvent.getRawPayload());
         assertTrue(savedEvent.getRawPayload().contains("\"message\":\"Connection timed out\""));
 
-        assertEquals(ProcessingStatus.NORMALIZED, savedEvent.getProcessingStatus());
-
-        NormalizedFailureEventEntity normalizedEntity = normalizedFailureEventRepository.findById(UUID.fromString(eventId))
-                .orElseThrow();
-
-        assertEquals(savedEvent.getEventId(), normalizedEntity.getEventId());
-        assertNotNull(normalizedEntity.getNormalizedPayload());
-        assertEquals("Connection timed out", normalizedEntity.getNormalizedPayload().get("message"));
-        assertEquals("payment-service", normalizedEntity.getNormalizedServiceName());
-        assertEquals("prod", normalizedEntity.getNormalizedEnvironment());
-        assertEquals("exception", normalizedEntity.getNormalizedEventType());
-        assertEquals("PSQLException", normalizedEntity.getNormalizedErrorType());
-        assertEquals("high", normalizedEntity.getNormalizedSeverity());
-        assertEquals(occurredAt, normalizedEntity.getNormalizedOccurredAt());
-        assertNotNull(normalizedEntity.getNormalizationMetadata());
-        assertEquals(NormalizationStatus.FULLY_NORMALIZED, normalizedEntity.getNormalizationStatus());
+        assertEquals(ProcessingStatus.RECEIVED, savedEvent.getProcessingStatus());
+        assertEquals(0, savedEvent.getAttemptCount());
+        assertNull(savedEvent.getLastAttemptAt());
+        assertNull(savedEvent.getNextAttemptAt());
+        assertNull(savedEvent.getProcessingStartedAt());
+        assertNull(savedEvent.getFailureCode());
+        assertNull(savedEvent.getFailureReason());
+        assertFalse(normalizedFailureEventRepository.existsById(UUID.fromString(eventId)));
     }
 
     @Test
