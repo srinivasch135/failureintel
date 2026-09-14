@@ -34,7 +34,8 @@ public class FailureEventQueryService {
 
     public FailureEventResponse getFailureEventByTraceId(String traceId) {
         Objects.requireNonNull(traceId, "traceId must not be null");
-        FailureEventEntity failureEvent = failureEventRepository.findByTraceId(traceId)
+        FailureEventEntity failureEvent = failureEventRepository
+                .findFirstByTraceIdOrderByIngestedAtDescEventIdDesc(traceId)
                 .orElseThrow(() -> new FailureEventNotFoundException(traceId));
         return toResponse(failureEvent);
     }

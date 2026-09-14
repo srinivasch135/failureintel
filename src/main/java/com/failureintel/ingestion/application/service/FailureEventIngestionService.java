@@ -12,18 +12,19 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
-
+import org.hibernate.exception.ConstraintViolationException;
 import java.sql.SQLException;
 import java.time.Instant;
 import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
 import java.util.UUID;
 
 @Service
 public class FailureEventIngestionService implements IngestFailureEventUseCase {
 
         private static final Logger logger = LoggerFactory.getLogger(FailureEventIngestionService.class);
-        private static final String TRACE_ID_UNIQUE_INDEX = "uq_failure_event_trace_id";
+        private static final String IDEMPOTENCY_KEY_UNIQUE_INDEX = "uq_failure_event_idempotency_key";
         private static final String POSTGRES_UNIQUE_VIOLATION = "23505";
 
         private final FailureEventRepository failureEventRepository;
@@ -33,39 +34,98 @@ public class FailureEventIngestionService implements IngestFailureEventUseCase {
         }
 
         @Override
-        @Transactional
         public String ingestFailureEvent(FailureEventIngestionRequest request) {
 
                 RawFailureEvent rawFailureEvent = mapRequestToRawFailureEvent(request);
-                FailureEventEntity entity = FailureEventEntityMapper.fromRaw(rawFailureEvent);
-                FailureEventEntity savedEntity = saveRawEntity(entity);
+                String idempotencyKey = resolveIdempotencyKey(request, rawFailureEvent);
+                String fingerprint = idempotencyKey == null
+                                ? null
+                                : FailureEventFingerprint.calculate(rawFailureEvent);
 
-                logger.info(
-                                "Persisted raw failure event for processing. eventId={} traceId={} processingStatus={}",
-                                savedEntity.getEventId(),
-                                savedEntity.getTraceId(),
-                                savedEntity.getProcessingStatus());
-
-                return savedEntity.getEventId().toString();
-        }
-
-        private FailureEventEntity saveRawEntity(FailureEventEntity entity) {
-                try {
-                        return failureEventRepository.saveAndFlush(entity);
-                } catch (DataIntegrityViolationException exception) {
-                        if (entity.getTraceId() != null && isTraceIdUniqueViolation(exception)) {
-                                throw new DuplicateFailureEventException(entity.getTraceId());
+                if (idempotencyKey != null) {
+                        Optional<FailureEventEntity> existing = failureEventRepository
+                                        .findByIdempotencyKey(idempotencyKey);
+                        if (existing.isPresent()) {
+                                return resolveExisting(existing.get(), rawFailureEvent, fingerprint, request);
                         }
-                        throw exception;
+                }
+
+                FailureEventEntity entity = FailureEventEntityMapper.fromRaw(rawFailureEvent);
+                entity.setIdempotencyKey(idempotencyKey);
+                entity.setIngestionFingerprint(fingerprint);
+
+                try {
+                        FailureEventEntity savedEntity = failureEventRepository.saveAndFlush(entity);
+
+                        logger.info(
+                                        "Persisted raw failure event for processing. eventId={} traceId={} idempotencyKeyPresent={} processingStatus={}",
+                                        savedEntity.getEventId(),
+                                        savedEntity.getTraceId(),
+                                        idempotencyKey != null,
+                                        savedEntity.getProcessingStatus());
+
+                        return savedEntity.getEventId().toString();
+                } catch (DataIntegrityViolationException exception) {
+                        if (idempotencyKey == null || !isIdempotencyKeyUniqueViolation(exception)) {
+                                throw exception;
+                        }
+
+                        // The failed insert transaction has ended. A fresh repository read
+                        // is required because PostgreSQL aborts the transaction that saw the
+                        // unique-key violation.
+                        FailureEventEntity existing = failureEventRepository
+                                        .findByIdempotencyKey(idempotencyKey)
+                                        .orElseThrow(() -> exception);
+                        return resolveExisting(existing, rawFailureEvent, fingerprint, request);
                 }
         }
 
-        private boolean isTraceIdUniqueViolation(Throwable failure) {
+        private String resolveExisting(
+                        FailureEventEntity existing,
+                        RawFailureEvent incoming,
+                        String incomingFingerprint,
+                        FailureEventIngestionRequest request) {
+                String existingFingerprint = existing.getIngestionFingerprint();
+                if (existingFingerprint == null) {
+                        existingFingerprint = FailureEventFingerprint.calculate(
+                                        FailureEventEntityMapper.toRaw(existing));
+                        // Legacy rows are compared without a write-back. This keeps the
+                        // idempotency lookup side-effect free and avoids a migration backfill.
+                }
+
+                if (!Objects.equals(existingFingerprint, incomingFingerprint)) {
+                        throw duplicateException(request);
+                }
+
+                logger.info(
+                                "Idempotent failure-event retry resolved to existing event. eventId={} traceId={} idempotencyKeyPresent={}",
+                                existing.getEventId(),
+                                incoming.getTraceId(),
+                                request.getIdempotencyKey() != null
+                                                && !request.getIdempotencyKey().isBlank());
+                return existing.getEventId().toString();
+        }
+
+        private DuplicateFailureEventException duplicateException(FailureEventIngestionRequest request) {
+                if (request.getIdempotencyKey() != null && !request.getIdempotencyKey().isBlank()) {
+                        return new DuplicateFailureEventException(
+                                        "idempotency key",
+                                        request.getIdempotencyKey().trim());
+                }
+                return new DuplicateFailureEventException(normalizeKey(request.getTraceId()));
+        }
+
+        private boolean isIdempotencyKeyUniqueViolation(Throwable failure) {
                 Throwable current = failure;
                 while (current != null) {
+                        if (current instanceof ConstraintViolationException constraintViolation
+                                        && IDEMPOTENCY_KEY_UNIQUE_INDEX.equals(
+                                                        constraintViolation.getConstraintName())) {
+                                return true;
+                        }
                         if (current instanceof SQLException sqlException
                                         && POSTGRES_UNIQUE_VIOLATION.equals(sqlException.getSQLState())
-                                        && containsTraceIdIndex(sqlException.getMessage())) {
+                                        && containsIdempotencyKeyIndex(sqlException.getMessage())) {
                                 return true;
                         }
                         current = current.getCause();
@@ -73,8 +133,20 @@ public class FailureEventIngestionService implements IngestFailureEventUseCase {
                 return false;
         }
 
-        private boolean containsTraceIdIndex(String message) {
-                return message != null && message.contains(TRACE_ID_UNIQUE_INDEX);
+        private boolean containsIdempotencyKeyIndex(String message) {
+                return message != null && message.contains(IDEMPOTENCY_KEY_UNIQUE_INDEX);
+        }
+
+        private String resolveIdempotencyKey(
+                        FailureEventIngestionRequest request,
+                        RawFailureEvent rawFailureEvent) {
+                String explicitKey = normalizeKey(request.getIdempotencyKey());
+                if (explicitKey != null) {
+                        return "key:" + explicitKey;
+                }
+
+                String legacyTraceId = rawFailureEvent.getTraceId();
+                return legacyTraceId == null ? null : "trace:" + legacyTraceId;
         }
 
         private RawFailureEvent mapRequestToRawFailureEvent(
@@ -88,7 +160,7 @@ public class FailureEventIngestionService implements IngestFailureEventUseCase {
                                 request.getErrorType(),
                                 request.getErrorMessage(),
                                 request.getDependencyTarget(),
-                                normalizeTraceId(request.getTraceId()),
+                                normalizeKey(request.getTraceId()),
                                 request.getSeverityHint(),
                                 request.getOccurredAt(),
                                 Instant.now(),
@@ -96,10 +168,10 @@ public class FailureEventIngestionService implements IngestFailureEventUseCase {
                                 Map.of());
         }
 
-        private String normalizeTraceId(String traceId) {
-                if (traceId == null || traceId.isBlank()) {
+        private String normalizeKey(String value) {
+                if (value == null || value.isBlank()) {
                         return null;
                 }
-                return traceId.trim();
+                return value.trim();
         }
 }

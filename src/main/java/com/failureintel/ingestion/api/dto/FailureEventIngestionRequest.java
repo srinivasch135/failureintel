@@ -26,9 +26,42 @@ public class FailureEventIngestionRequest {
     private String errorMessage;
     private String dependencyTarget;
     private String traceId;
+    private String idempotencyKey;
     private String severityHint;
     @NotNull(message = "Raw payload is required")
     private Map<String, Object> rawPayload;
+
+    /**
+     * Compatibility constructor retained for callers compiled against the
+     * pre-idempotency request shape. New callers may use the generated
+     * all-arguments constructor including idempotencyKey.
+     */
+    public FailureEventIngestionRequest(
+            Instant occurredAt,
+            String serviceName,
+            String serverName,
+            String environment,
+            String eventType,
+            String errorType,
+            String errorMessage,
+            String dependencyTarget,
+            String traceId,
+            String severityHint,
+            Map<String, Object> rawPayload) {
+        this(
+                occurredAt,
+                serviceName,
+                serverName,
+                environment,
+                eventType,
+                errorType,
+                errorMessage,
+                dependencyTarget,
+                traceId,
+                null,
+                severityHint,
+                rawPayload);
+    }
 
     public Instant getOccurredAt() {
         return occurredAt;
@@ -116,6 +149,14 @@ public class FailureEventIngestionRequest {
 
     public void setTraceId(String traceId) {
         this.traceId = traceId;
+    }
+
+    public String getIdempotencyKey() {
+        return idempotencyKey;
+    }
+
+    public void setIdempotencyKey(String idempotencyKey) {
+        this.idempotencyKey = idempotencyKey;
     }
 
     public String getSeverityHint() {

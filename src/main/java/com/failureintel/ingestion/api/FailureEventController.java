@@ -18,6 +18,7 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
@@ -42,7 +43,11 @@ public class FailureEventController {
 
     @PostMapping(consumes = MediaType.APPLICATION_JSON_VALUE)
     public ResponseEntity<FailureEventAcceptedResponse> ingestFailureEvent(
-            @Valid @RequestBody FailureEventIngestionRequest request) {
+            @Valid @RequestBody FailureEventIngestionRequest request,
+            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey) {
+        if (idempotencyKey != null && !idempotencyKey.isBlank()) {
+            request.setIdempotencyKey(idempotencyKey);
+        }
         logger.info("Received failure event ingestion request for service={} environment={} eventType={}",
                 request.getServiceName(), request.getEnvironment(), request.getEventType());
         String eventId = ingestFailureEventUseCase.ingestFailureEvent(request);

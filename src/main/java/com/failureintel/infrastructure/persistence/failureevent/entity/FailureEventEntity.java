@@ -39,6 +39,10 @@ public class FailureEventEntity {
     private String dependencyTarget;
     @Column(name = "trace_id", length = 120)
     private String traceId;
+    @Column(name = "idempotency_key", length = 255)
+    private String idempotencyKey;
+    @Column(name = "ingestion_fingerprint", length = 67)
+    private String ingestionFingerprint;
     @Column(name = "severity_hint", length = 50)
     private String severityHint;
     @Column(name = "raw_payload", columnDefinition = "TEXT")
@@ -163,6 +167,22 @@ public class FailureEventEntity {
 
     public void setTraceId(String traceId) {
         this.traceId = traceId;
+    }
+
+    public String getIdempotencyKey() {
+        return idempotencyKey;
+    }
+
+    public void setIdempotencyKey(String idempotencyKey) {
+        this.idempotencyKey = idempotencyKey;
+    }
+
+    public String getIngestionFingerprint() {
+        return ingestionFingerprint;
+    }
+
+    public void setIngestionFingerprint(String ingestionFingerprint) {
+        this.ingestionFingerprint = ingestionFingerprint;
     }
 
     public String getSeverityHint() {

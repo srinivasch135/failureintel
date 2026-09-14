@@ -5,11 +5,20 @@ import com.failureintel.infrastructure.persistence.failureevent.entity.Processin
 import org.springframework.data.domain.*;
 import org.springframework.data.jpa.repository.*;
 import org.springframework.data.repository.query.Param;
+import org.springframework.transaction.annotation.Propagation;
+import org.springframework.transaction.annotation.Transactional;
 import java.time.Instant;
 import java.util.*;
 
 public interface FailureEventRepository extends JpaRepository<FailureEventEntity, UUID> {
-        Optional<FailureEventEntity> findByTraceId(String traceId);
+        Optional<FailureEventEntity> findFirstByTraceIdOrderByIngestedAtDescEventIdDesc(String traceId);
+
+        @Transactional(readOnly = true, propagation = Propagation.REQUIRES_NEW)
+        Optional<FailureEventEntity> findByIdempotencyKey(String idempotencyKey);
+
+        @Override
+        @Transactional(propagation = Propagation.REQUIRES_NEW)
+        FailureEventEntity saveAndFlush(FailureEventEntity entity);
 
         boolean existsByTraceId(String traceId);
 

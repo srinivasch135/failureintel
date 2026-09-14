@@ -191,26 +191,27 @@ Invalid JSON returns `400`. An oversized body returns `413`. Such requests are o
 
 ## 8. Idempotent ingestion
 
-`existsByTraceId()` followed by an insert is not concurrency-safe. Enforce idempotency at the database boundary.
+`traceId` is a correlation identifier for the distributed request flow and is not unique. A single trace can legitimately contain multiple failure events. Enforce idempotency with a separate producer-supplied `Idempotency-Key` (or source event ID) at the database boundary.
 
 After auditing and resolving existing duplicate values, add a partial unique index:
 
 ```sql
-CREATE UNIQUE INDEX uq_failure_event_trace_id
-    ON failure_event(trace_id)
-    WHERE trace_id IS NOT NULL
-      AND trace_id <> '';
+CREATE UNIQUE INDEX uq_failure_event_idempotency_key
+    ON failure_event(idempotency_key)
+    WHERE idempotency_key IS NOT NULL
+      AND BTRIM(idempotency_key) <> '';
 ```
 
 Target behavior:
 
-- same trace ID and equivalent payload: return the existing event ID;
-- same trace ID and materially different payload: return `409 Conflict`;
-- no trace ID: accept with a generated event ID, but exactly-once client retry behavior is not guaranteed.
+- same idempotency key and equivalent raw content: return the existing event ID;
+- same idempotency key and materially different raw content: return `409 Conflict`;
+- different idempotency key with the same trace ID: create a new event;
+- no idempotency key: accept a new event, but exactly-once client retry behavior is not guaranteed.
 
-A deterministic payload hash may be stored to distinguish an idempotent retry from conflicting reuse of the same trace ID.
+A deterministic fingerprint of the raw content should be stored to distinguish an idempotent retry from conflicting reuse of the same idempotency key. The fingerprint excludes generated identity, ingestion time, processing state, normalized fields, and trace ID.
 
-The database unique index is the final concurrency guard. If two inserts race, handle the unique-constraint failure by loading the existing row and applying the behavior above.
+The database unique index is the final concurrency guard. If two inserts race, allow the losing write transaction to end, reload the winner in a fresh transaction, and apply the fingerprint comparison above.
 
 ## 9. Transaction boundaries and component ownership
 
@@ -399,7 +400,8 @@ Required or recommended raw-table columns:
 ALTER TABLE failure_event
     ADD COLUMN IF NOT EXISTS source_system VARCHAR(255),
     ADD COLUMN IF NOT EXISTS source_metadata JSONB,
-    ADD COLUMN IF NOT EXISTS payload_hash VARCHAR(64),
+    ADD COLUMN IF NOT EXISTS idempotency_key VARCHAR(255),
+    ADD COLUMN IF NOT EXISTS ingestion_fingerprint VARCHAR(67),
     ADD COLUMN IF NOT EXISTS attempt_count INTEGER NOT NULL DEFAULT 0,
     ADD COLUMN IF NOT EXISTS last_attempt_at TIMESTAMP,
     ADD COLUMN IF NOT EXISTS next_attempt_at TIMESTAMP,
@@ -418,7 +420,7 @@ CREATE INDEX IF NOT EXISTS idx_failure_event_processing_queue
     );
 ```
 
-Also add the trace-ID unique index described in the idempotency section after auditing duplicates.
+Add the idempotency-key unique index described in the idempotency section after auditing existing data. Do not add a uniqueness constraint to `trace_id`.
 
 Before finalizing the migration, reconcile the existing `server_name` column with the target `source_system` name. Do not maintain two authoritative columns for the same value.
 
