@@ -43,6 +43,22 @@ public interface FailureEventRepository extends JpaRepository<FailureEventEntity
         int updateProcessingStatus(@Param("eventId") UUID eventId,
                         @Param("processingStatus") ProcessingStatus processingStatus);
 
+        @Query(value = """
+                        SELECT fe.*
+                        FROM failure_event fe
+                        WHERE fe.processing_status = 'RECEIVED'
+                           OR (
+                                fe.processing_status = 'RETRYABLE'
+                                AND fe.next_attempt_at <= :eligibleAt
+                           )
+                        ORDER BY fe.ingested_at ASC, fe.event_id ASC
+                        LIMIT :batchSize
+                        FOR UPDATE SKIP LOCKED
+                        """, nativeQuery = true)
+        List<FailureEventEntity> lockNextEligibleForProcessing(
+                @Param("eligibleAt") Instant eligibleAt,
+                @Param("batchSize") int batchSize);
+
         Page<FailureEventEntity> findByOccurredAtBetween(
                         Instant start,
                         Instant end,
