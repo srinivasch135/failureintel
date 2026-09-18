@@ -17,6 +17,11 @@ public class FailureEventEntity {
     @Id
     @Column(name = "event_id", nullable = false, updatable = false)
     private UUID eventId;
+
+    @Version
+    @Column(name = "version", nullable = false)
+    private Long version;
+
     @Column(name = "occurred_at", nullable = false)
     private Instant occurredAt;
     @Column(name = "failure_type")

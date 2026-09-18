@@ -8,7 +8,6 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
 import java.util.List;
-import java.util.UUID;
 
 @Service
 public class FailureEventClaimService {
@@ -20,11 +19,12 @@ public class FailureEventClaimService {
     }
 
     /**
-     * Claims a bounded batch and commits the claim before returning its IDs.
+     * Claims a bounded batch and commits the claim before returning its claim
+     * identities.
      * Parsing and normalization must happen after this transaction has ended.
      */
     @Transactional(propagation = Propagation.REQUIRES_NEW)
-    public List<UUID> claimNextEligibleForProcessing(int batchSize) {
+    public List<ClaimedFailureEvent> claimNextEligibleForProcessing(int batchSize) {
         if (batchSize <= 0) {
             throw new IllegalArgumentException("batchSize must be greater than zero");
         }
@@ -36,7 +36,9 @@ public class FailureEventClaimService {
         candidates.forEach(event -> event.claimForProcessing(claimedAt));
 
         return candidates.stream()
-                .map(FailureEventEntity::getEventId)
+                .map(event -> new ClaimedFailureEvent(
+                        event.getEventId(),
+                        event.getAttemptCount()))
                 .toList();
     }
 }

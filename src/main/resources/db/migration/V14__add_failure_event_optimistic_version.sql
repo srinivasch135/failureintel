@@ -1,0 +1,2 @@
+ALTER TABLE failure_event
+    ADD COLUMN version BIGINT NOT NULL DEFAULT 0;

@@ -30,6 +30,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -86,7 +87,10 @@ class FailureEventClaimServiceIntegrationTest {
         FailureEventEntity failed = persistEvent("failed", ProcessingStatus.FAILED,
                 Instant.parse("2026-09-15T10:05:00Z"));
 
-        List<UUID> claimedIds = claimService.claimNextEligibleForProcessing(2);
+        List<ClaimedFailureEvent> claims = claimService.claimNextEligibleForProcessing(2);
+        List<UUID> claimedIds = claims.stream()
+                .map(ClaimedFailureEvent::eventId)
+                .toList();
 
         assertEquals(List.of(received.getEventId(), dueRetryable.getEventId()), claimedIds);
         assertClaimed(received.getEventId(), 1);
@@ -104,7 +108,10 @@ class FailureEventClaimServiceIntegrationTest {
                 Instant.parse("2026-09-15T10:00:00Z"),
                 ELIGIBLE_RETRY_AT);
 
-        List<UUID> claimedIds = claimService.claimNextEligibleForProcessing(1);
+        List<ClaimedFailureEvent> claims = claimService.claimNextEligibleForProcessing(1);
+        List<UUID> claimedIds = claims.stream()
+                .map(ClaimedFailureEvent::eventId)
+                .toList();
 
         assertEquals(List.of(retryable.getEventId()), claimedIds);
         FailureEventEntity claimed = failureEventRepository.findById(retryable.getEventId()).orElseThrow();
@@ -138,12 +145,16 @@ class FailureEventClaimServiceIntegrationTest {
         CountDownLatch start = new CountDownLatch(1);
         ExecutorService executor = Executors.newFixedThreadPool(2);
         try {
-            Future<List<UUID>> first = executor.submit(() -> claimAfter(start, 3));
-            Future<List<UUID>> second = executor.submit(() -> claimAfter(start, 3));
+            Future<List<ClaimedFailureEvent>> first = executor.submit(() -> claimAfter(start, 3));
+            Future<List<ClaimedFailureEvent>> second = executor.submit(() -> claimAfter(start, 3));
             start.countDown();
 
-            Set<UUID> firstBatch = new HashSet<>(first.get(10, TimeUnit.SECONDS));
-            Set<UUID> secondBatch = new HashSet<>(second.get(10, TimeUnit.SECONDS));
+            Set<UUID> firstBatch = first.get(10, TimeUnit.SECONDS).stream()
+                    .map(ClaimedFailureEvent::eventId)
+                    .collect(Collectors.toSet());
+            Set<UUID> secondBatch = second.get(10, TimeUnit.SECONDS).stream()
+                    .map(ClaimedFailureEvent::eventId)
+                    .collect(Collectors.toSet());
             Set<UUID> claimedIds = new HashSet<>(firstBatch);
             claimedIds.addAll(secondBatch);
 
@@ -180,9 +191,11 @@ class FailureEventClaimServiceIntegrationTest {
                     releaseLock));
             assertTrue(lockAcquired.await(5, TimeUnit.SECONDS));
 
-            Future<List<UUID>> claim = executor.submit(
+            Future<List<ClaimedFailureEvent>> claim = executor.submit(
                     () -> claimService.claimNextEligibleForProcessing(1));
-            List<UUID> claimedIds = claim.get(5, TimeUnit.SECONDS);
+            List<UUID> claimedIds = claim.get(5, TimeUnit.SECONDS).stream()
+                    .map(ClaimedFailureEvent::eventId)
+                    .toList();
 
             assertEquals(List.of(availableEvent.getEventId()), claimedIds);
             releaseLock.countDown();
@@ -193,7 +206,7 @@ class FailureEventClaimServiceIntegrationTest {
         }
     }
 
-    private List<UUID> claimAfter(CountDownLatch start, int batchSize) throws InterruptedException {
+    private List<ClaimedFailureEvent> claimAfter(CountDownLatch start, int batchSize) throws InterruptedException {
         assertTrue(start.await(5, TimeUnit.SECONDS));
         return claimService.claimNextEligibleForProcessing(batchSize);
     }
