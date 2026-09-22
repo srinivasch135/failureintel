@@ -31,7 +31,8 @@ This document is the executable correctness contract for the synchronous ingesti
 | Empty payload | Empty JSON object | One failed raw row with reason; no normalized row |
 | No useful failure data | Non-empty payload without minimum useful fields | One failed raw row with reason; no normalized row |
 | Parser failure | Parser throws | One failed raw row with reason; no normalized write attempted |
-| Duplicate trace ID | Same nonblank trace ID ingested twice | Second call rejected; original raw and normalized row counts unchanged |
+| Trace correlation | Distinct events share a nonblank trace ID | Both raw events are preserved; trace ID is not an idempotency key |
+| Legacy trace retry | Equivalent no-key retry matches an existing `trace:<traceId>` row | Existing legacy event is returned; conflicting content is persisted as a new event |
 | HTTP validation | Missing/null/blank required fields | HTTP 400 and no database write |
 | Transaction rollback | Normalized repository write fails after raw save | Exception propagates and raw insert is rolled back |
 

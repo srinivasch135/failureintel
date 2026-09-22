@@ -4,6 +4,7 @@ import com.failureintel.ingestion.api.dto.FailureEventIngestionRequest;
 import com.failureintel.ingestion.application.exception.DuplicateFailureEventException;
 import com.failureintel.infrastructure.persistence.failureevent.entity.FailureEventEntity;
 import com.failureintel.infrastructure.persistence.failureevent.entity.ProcessingStatus;
+import com.failureintel.infrastructure.persistence.failureevent.mapper.FailureEventEntityMapper;
 import com.failureintel.infrastructure.persistence.failureevent.repository.FailureEventRepository;
 import com.failureintel.infrastructure.persistence.normalizedFailureEvent.repository.NormalizedFailureEventRepository;
 import org.junit.jupiter.api.AfterEach;
@@ -144,6 +145,7 @@ class FailureEventPipelineIntegrationTest {
                 FailureEventIngestionRequest firstRequest = createValidRequest();
 
                 UUID originalEventId = toRepositoryId(ingestionService.ingestFailureEvent(firstRequest));
+                markAsLegacyTraceRow(originalEventId, firstRequest.getTraceId());
 
                 UUID retriedEventId = toRepositoryId(ingestionService.ingestFailureEvent(createValidRequest()));
 
@@ -152,6 +154,21 @@ class FailureEventPipelineIntegrationTest {
                 assertEquals(0, normalizedFailureEventRepository.count());
                 assertTrue(failureEventRepository.existsById(originalEventId));
                 assertFalse(normalizedFailureEventRepository.existsById(originalEventId));
+        }
+
+        @Test
+        void shouldPersistDistinctEventForConflictingLegacyTraceRetry() {
+                FailureEventIngestionRequest firstRequest = createValidRequest();
+
+                UUID originalEventId = toRepositoryId(ingestionService.ingestFailureEvent(firstRequest));
+                markAsLegacyTraceRow(originalEventId, firstRequest.getTraceId());
+
+                FailureEventIngestionRequest conflictingRequest = createValidRequest();
+                conflictingRequest.setErrorMessage("different failure content");
+                UUID newEventId = toRepositoryId(ingestionService.ingestFailureEvent(conflictingRequest));
+
+                assertNotEquals(originalEventId, newEventId);
+                assertEquals(2, failureEventRepository.count());
         }
 
         @Test
@@ -273,6 +290,14 @@ class FailureEventPipelineIntegrationTest {
                 } catch (IllegalArgumentException e) {
                         throw new AssertionError("Invalid event ID format: " + eventId, e);
                 }
+        }
+
+        private void markAsLegacyTraceRow(UUID eventId, String traceId) {
+                FailureEventEntity legacyEvent = failureEventRepository.findById(eventId).orElseThrow();
+                legacyEvent.setIdempotencyKey("trace:" + traceId);
+                legacyEvent.setIngestionFingerprint(
+                                FailureEventFingerprint.calculate(FailureEventEntityMapper.toRaw(legacyEvent)));
+                failureEventRepository.saveAndFlush(legacyEvent);
         }
 
         private void verifySavedEvent(FailureEventEntity savedEvent, FailureEventIngestionRequest request) {

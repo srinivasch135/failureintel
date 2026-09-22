@@ -209,6 +209,11 @@ Target behavior:
 - different idempotency key with the same trace ID: create a new event;
 - no idempotency key: accept a new event, but exactly-once client retry behavior is not guaranteed.
 
+For compatibility with rows created before explicit idempotency keys were introduced,
+a no-key retry may resolve to an existing `trace:<traceId>` row only when its raw
+content fingerprint is equivalent. A conflicting event with the same trace ID is
+persisted as a new raw event and is not rejected because of the trace ID.
+
 A deterministic fingerprint of the raw content should be stored to distinguish an idempotent retry from conflicting reuse of the same idempotency key. The fingerprint excludes generated identity, ingestion time, processing state, normalized fields, and trace ID.
 
 The database unique index is the final concurrency guard. If two inserts race, allow the losing write transaction to end, reload the winner in a fresh transaction, and apply the fingerprint comparison above.
@@ -558,8 +563,9 @@ The checkpoint is not complete until automated tests prove:
 9. One failed event does not roll back other events in a claimed batch.
 10. An expired `PROCESSING` lease becomes `RETRYABLE` or `FAILED` at the attempt limit.
 11. Retry delays and maximum-attempt handling are deterministic under a fixed clock.
-12. Concurrent identical trace IDs produce one raw event.
-13. Conflicting reuse of a trace ID returns `409`.
+12. Concurrent requests with the same explicit idempotency key produce one raw event.
+13. Distinct events sharing a trace ID are both preserved; an equivalent retry of a
+    legacy `trace:<traceId>` row resolves to that row.
 14. Restarting the application does not lose `RECEIVED` or `RETRYABLE` work.
 15. Read-by-ID works before normalization and after permanent failure.
 

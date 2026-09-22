@@ -37,7 +37,7 @@ public class FailureEventIngestionService implements IngestFailureEventUseCase {
         public String ingestFailureEvent(FailureEventIngestionRequest request) {
 
                 RawFailureEvent rawFailureEvent = mapRequestToRawFailureEvent(request);
-                String idempotencyKey = resolveIdempotencyKey(request, rawFailureEvent);
+                String idempotencyKey = resolveIdempotencyKey(request);
                 String fingerprint = idempotencyKey == null
                                 ? null
                                 : FailureEventFingerprint.calculate(rawFailureEvent);
@@ -47,6 +47,11 @@ public class FailureEventIngestionService implements IngestFailureEventUseCase {
                                         .findByIdempotencyKey(idempotencyKey);
                         if (existing.isPresent()) {
                                 return resolveExisting(existing.get(), rawFailureEvent, fingerprint, request);
+                        }
+                } else {
+                        Optional<String> legacyRetryEventId = resolveEquivalentLegacyTraceRetry(rawFailureEvent);
+                        if (legacyRetryEventId.isPresent()) {
+                                return legacyRetryEventId.get();
                         }
                 }
 
@@ -137,16 +142,42 @@ public class FailureEventIngestionService implements IngestFailureEventUseCase {
                 return message != null && message.contains(IDEMPOTENCY_KEY_UNIQUE_INDEX);
         }
 
-        private String resolveIdempotencyKey(
-                        FailureEventIngestionRequest request,
-                        RawFailureEvent rawFailureEvent) {
+        private String resolveIdempotencyKey(FailureEventIngestionRequest request) {
                 String explicitKey = normalizeKey(request.getIdempotencyKey());
                 if (explicitKey != null) {
                         return "key:" + explicitKey;
                 }
+                return null;
+        }
 
-                String legacyTraceId = rawFailureEvent.getTraceId();
-                return legacyTraceId == null ? null : "trace:" + legacyTraceId;
+        private Optional<String> resolveEquivalentLegacyTraceRetry(RawFailureEvent incoming) {
+                String traceId = normalizeKey(incoming.getTraceId());
+                if (traceId == null) {
+                        return Optional.empty();
+                }
+
+                Optional<FailureEventEntity> legacyEvent = failureEventRepository
+                                .findByIdempotencyKey("trace:" + traceId);
+                if (legacyEvent.isEmpty()) {
+                        return Optional.empty();
+                }
+
+                String incomingFingerprint = FailureEventFingerprint.calculate(incoming);
+                String existingFingerprint = legacyEvent.get().getIngestionFingerprint();
+                if (existingFingerprint == null) {
+                        existingFingerprint = FailureEventFingerprint.calculate(
+                                        FailureEventEntityMapper.toRaw(legacyEvent.get()));
+                }
+
+                if (!Objects.equals(existingFingerprint, incomingFingerprint)) {
+                        return Optional.empty();
+                }
+
+                logger.info(
+                                "Legacy trace-based retry resolved to existing event. eventId={} traceId={}",
+                                legacyEvent.get().getEventId(),
+                                incoming.getTraceId());
+                return Optional.of(legacyEvent.get().getEventId().toString());
         }
 
         private RawFailureEvent mapRequestToRawFailureEvent(
@@ -160,7 +191,7 @@ public class FailureEventIngestionService implements IngestFailureEventUseCase {
                                 request.getErrorType(),
                                 request.getErrorMessage(),
                                 request.getDependencyTarget(),
-                                normalizeKey(request.getTraceId()),
+                                request.getTraceId(),
                                 request.getSeverityHint(),
                                 request.getOccurredAt(),
                                 Instant.now(),

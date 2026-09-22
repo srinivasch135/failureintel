@@ -78,7 +78,8 @@ The ingestion integration tests load both records by event ID. They verify that 
 
 ## Findings
 
-- The duplicate trace check is using the correct repository.
+- Legacy trace-based compatibility lookup uses the failure-event repository; new
+  events are not deduplicated solely by trace ID.
 - The normalized search methods are on the correct repository.
 - The first GET endpoint reads through `FailureEventQueryService`; the controller does not select repositories.
 - `findRecentSimilarErrors(...)` is the only read method that needs an ownership decision.
