@@ -2,7 +2,9 @@ package com.failureintel.ingestion.application.service;
 
 import com.failureintel.infrastructure.persistence.failureevent.entity.ProcessingStatus;
 import com.failureintel.infrastructure.persistence.failureevent.repository.FailureEventRepository;
-import com.failureintel.infrastructure.persistence.normalizedFailureEvent.entity.NormalizedFailureEventEntity;
+import com.failureintel.ingestion.domain.model.NormalizedFailureEvent;
+import com.failureintel.ingestion.domain.normalization.FailureEventNormalizer;
+import com.failureintel.ingestion.domain.normalization.NormalizationStatus;
 import com.failureintel.infrastructure.persistence.normalizedFailureEvent.repository.NormalizedFailureEventRepository;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -20,10 +22,13 @@ import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.utility.DockerImageName;
 
+import java.time.Instant;
+import java.util.Map;
 import java.util.UUID;
 
 import static com.failureintel.test.support.FailureEventTestFixtures.validRequest;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.when;
@@ -57,8 +62,11 @@ class FailureEventNormalizationProcessorRollbackIntegrationTest {
     @Autowired
     private FailureEventRepository failureEventRepository;
 
-    @MockitoBean
+    @Autowired
     private NormalizedFailureEventRepository normalizedFailureEventRepository;
+
+    @MockitoBean
+    private FailureEventNormalizer failureEventNormalizer;
 
     @AfterEach
     void cleanUp() {
@@ -66,11 +74,9 @@ class FailureEventNormalizationProcessorRollbackIntegrationTest {
     }
 
     @Test
-    void shouldLeaveClaimedRawEventAvailableWhenNormalizedPersistenceFails() {
-        when(normalizedFailureEventRepository.findById(any(UUID.class)))
-                .thenReturn(java.util.Optional.empty());
-        when(normalizedFailureEventRepository.save(any(NormalizedFailureEventEntity.class)))
-                .thenThrow(new DataIntegrityViolationException("simulated normalized write failure"));
+    void shouldRollBackRawNormalizationStatusWhenNormalizedPersistenceFails() {
+        when(failureEventNormalizer.normalize(any()))
+                .thenReturn(normalizedEventExceedingDatabaseColumnLength());
 
         UUID eventId = UUID.fromString(
                 ingestionService.ingestFailureEvent(validRequest("trace-normalization-rollback-001")));
@@ -84,5 +90,25 @@ class FailureEventNormalizationProcessorRollbackIntegrationTest {
         assertEquals(
                 ProcessingStatus.PROCESSING,
                 failureEventRepository.findById(eventId).orElseThrow().getProcessingStatus());
+        assertFalse(normalizedFailureEventRepository.existsById(eventId));
+    }
+
+    private NormalizedFailureEvent normalizedEventExceedingDatabaseColumnLength() {
+        return new NormalizedFailureEvent(
+                UUID.randomUUID(),
+                "x".repeat(256),
+                "prod",
+                "exception",
+                "PSQLException",
+                "Connection timeout",
+                "payment-database",
+                "trace-normalization-rollback-001",
+                "high",
+                Instant.parse("2026-08-03T20:00:00Z"),
+                Instant.parse("2026-08-03T20:00:01Z"),
+                NormalizationStatus.FULLY_NORMALIZED,
+                Map.of("source", "test"),
+                Map.of(),
+                Map.of());
     }
 }
