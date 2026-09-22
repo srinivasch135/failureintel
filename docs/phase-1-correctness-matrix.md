@@ -34,6 +34,8 @@ This document is the executable correctness contract for the synchronous ingesti
 | Trace correlation | Distinct events share a nonblank trace ID | Both raw events are preserved; trace ID is not an idempotency key |
 | Legacy trace retry | Equivalent no-key retry matches an existing `trace:<traceId>` row | Existing legacy event is returned; conflicting content is persisted as a new event |
 | HTTP validation | Missing/null/blank required fields | HTTP 400 and no database write |
+| Persistence-safe envelope | Bounded fields exceed raw-table limits | HTTP 400 and no database write |
+| Request size | Request exceeds configured transport limit | HTTP 413 and no database write |
 | Transaction rollback | Normalized repository write fails after raw save | Exception propagates and raw insert is rolled back |
 
 ## Exit gate

@@ -51,3 +51,6 @@ management:
 server:
   port: ${SERVER_PORT:8081}
   shutdown: graceful
+  tomcat:
+    max-http-form-post-size: 1MB
+    max-swallow-size: 1MB

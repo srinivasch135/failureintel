@@ -2,6 +2,7 @@ package com.failureintel.ingestion.api.dto;
 
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
+import jakarta.validation.constraints.Size;
 import lombok.AllArgsConstructor;
 import lombok.NoArgsConstructor;
 
@@ -14,19 +15,28 @@ public class FailureEventIngestionRequest {
     @NotNull(message = "Occurred at is required")
     private Instant occurredAt;
     @NotNull(message = "Service name is required")
+    @Size(max = 120, message = "Service name must not exceed 120 characters")
     private String serviceName;
     @NotNull(message = "Server name is required")
+    @Size(max = 255, message = "Server name must not exceed 255 characters")
     private String serverName;
     @NotBlank(message = "Environment is required")
+    @Size(max = 50, message = "Environment must not exceed 50 characters")
     private String environment;
     @NotBlank(message = "Event type is required")
+    @Size(max = 80, message = "Event type must not exceed 80 characters")
     private String eventType;
+    @Size(max = 150, message = "Error type must not exceed 150 characters")
     private String errorType;
     @NotBlank(message = "Error message is required")
     private String errorMessage;
+    @Size(max = 200, message = "Dependency target must not exceed 200 characters")
     private String dependencyTarget;
+    @Size(max = 120, message = "Trace ID must not exceed 120 characters")
     private String traceId;
+    @Size(max = 255, message = "Idempotency key must not exceed 255 characters")
     private String idempotencyKey;
+    @Size(max = 50, message = "Severity hint must not exceed 50 characters")
     private String severityHint;
     @NotNull(message = "Raw payload is required")
     private Map<String, Object> rawPayload;

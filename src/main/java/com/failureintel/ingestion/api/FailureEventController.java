@@ -7,6 +7,7 @@ import com.failureintel.ingestion.api.dto.PageResponse;
 import com.failureintel.ingestion.application.service.FailureEventQueryService;
 import com.failureintel.ingestion.application.useCase.IngestFailureEventUseCase;
 import jakarta.validation.Valid;
+import jakarta.validation.constraints.Size;
 import org.springframework.data.domain.Pageable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -21,10 +22,12 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.validation.annotation.Validated;
 
 import java.util.UUID;
 
 @RestController
+@Validated
 @RequestMapping(path = "/api/v1/failure-events", produces = MediaType.APPLICATION_JSON_VALUE)
 public class FailureEventController {
     private static final Logger logger = LoggerFactory.getLogger(FailureEventController.class);
@@ -44,7 +47,8 @@ public class FailureEventController {
     @PostMapping(consumes = MediaType.APPLICATION_JSON_VALUE)
     public ResponseEntity<FailureEventAcceptedResponse> ingestFailureEvent(
             @Valid @RequestBody FailureEventIngestionRequest request,
-            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey) {
+            @RequestHeader(value = "Idempotency-Key", required = false)
+            @Size(max = 255, message = "Idempotency key must not exceed 255 characters") String idempotencyKey) {
         if (idempotencyKey != null && !idempotencyKey.isBlank()) {
             request.setIdempotencyKey(idempotencyKey);
         }

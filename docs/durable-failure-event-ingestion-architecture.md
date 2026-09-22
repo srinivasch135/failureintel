@@ -157,6 +157,7 @@ The API performs only validation required to store the request safely:
 - request body is syntactically valid JSON;
 - request does not exceed the configured size limit;
 - values do not violate storage/security limits;
+- bounded string fields fit their raw-table column limits;
 - the raw payload can be represented by the persistence model.
 
 Business completeness is evaluated during processing, not raw capture. A syntactically valid but semantically incomplete failure event should normally be retained and later marked `FAILED`.

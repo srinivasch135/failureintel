@@ -100,6 +100,20 @@ class FailureEventControllerTest {
     }
 
     @Test
+    void shouldRejectValuesThatCannotFitInRawEventColumns() throws Exception {
+        String oversizedServiceName = "s".repeat(121);
+
+        mockMvc.perform(post("/api/v1/failure-events")
+                .contentType(APPLICATION_JSON)
+                .content(validIngestionRequest("trace-too-long-service-001")
+                        .replace("payment-service", oversizedServiceName)))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error").value("VALIDATION_ERROR"))
+                .andExpect(jsonPath("$.message")
+                        .value("serviceName: Service name must not exceed 120 characters"));
+    }
+
+    @Test
     void shouldReturnConflictForDuplicateTraceId() throws Exception {
         when(ingestFailureEventUseCase.ingestFailureEvent(isA(FailureEventIngestionRequest.class)))
                 .thenThrow(new DuplicateFailureEventException("trace-duplicate-001"));

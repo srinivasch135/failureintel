@@ -15,6 +15,7 @@ import org.springframework.dao.DataAccessException;
 import org.springframework.http.*;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.bind.MethodArgumentNotValidException;
+import org.springframework.web.method.annotation.HandlerMethodValidationException;
 import org.springframework.web.bind.MissingServletRequestParameterException;
 import org.springframework.web.HttpRequestMethodNotSupportedException;
 
@@ -78,6 +79,26 @@ public class GlobalExceptionHandler {
 
                 String errorMessage = ex.getBindingResult().getFieldErrors().stream()
                                 .map(error -> error.getField() + ": " + error.getDefaultMessage())
+                                .collect(Collectors.joining("; "));
+
+                log.warn("VALIDATION_ERROR | {} | Path: {} | Method: {}",
+                                errorMessage,
+                                request.getRequestURI(),
+                                request.getMethod());
+
+                return build(HttpStatus.BAD_REQUEST,
+                                "VALIDATION_ERROR",
+                                errorMessage,
+                                request);
+        }
+
+        @ExceptionHandler(HandlerMethodValidationException.class)
+        public ResponseEntity<ApiErrorResponse> handleMethodValidationException(
+                        HandlerMethodValidationException ex,
+                        HttpServletRequest request) {
+
+                String errorMessage = ex.getAllErrors().stream()
+                                .map(error -> error.getDefaultMessage())
                                 .collect(Collectors.joining("; "));
 
                 log.warn("VALIDATION_ERROR | {} | Path: {} | Method: {}",
