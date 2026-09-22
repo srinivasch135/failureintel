@@ -78,11 +78,14 @@ public class FailureEventNormalizationProcessor {
 
         NormalizedFailureEventEntity normalizedEntity = normalizedFailureEventRepository
                 .findById(failureEvent.getEventId())
+                .map(existingEntity -> {
+                    existingEntity.applyNormalizedEvent(normalizedFailureEvent);
+                    return existingEntity;
+                })
                 .orElseGet(() -> NormalizedFailureEventEntityMapper.fromDomain(
                         normalizedFailureEvent,
                         failureEvent));
 
-        normalizedEntity.applyNormalizedEvent(normalizedFailureEvent);
         normalizedEntity.setFailureReason(null);
         normalizedFailureEventRepository.save(normalizedEntity);
 
