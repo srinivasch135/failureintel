@@ -27,6 +27,7 @@ import java.util.UUID;
 import static com.failureintel.test.support.FailureEventTestFixtures.validRequest;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 @SpringBootTest
@@ -80,6 +81,10 @@ class FailureEventNormalizationProcessorIntegrationTest {
                 .orElseThrow();
 
         assertEquals(ProcessingStatus.NORMALIZED, rawEvent.getProcessingStatus());
+        assertNull(rawEvent.getProcessingStartedAt());
+        assertNull(rawEvent.getNextAttemptAt());
+        assertNull(rawEvent.getFailureCode());
+        assertNull(rawEvent.getFailureReason());
         assertEquals(eventId, normalizedEvent.getEventId());
         assertEquals("payment-service", normalizedEvent.getNormalizedServiceName());
         assertEquals("prod", normalizedEvent.getNormalizedEnvironment());
