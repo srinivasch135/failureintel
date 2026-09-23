@@ -54,3 +54,7 @@ server:
   tomcat:
     max-http-form-post-size: 1MB
     max-swallow-size: 1MB
+
+failure-event:
+  ingestion:
+    max-request-size-bytes: ${FAILURE_EVENT_MAX_REQUEST_SIZE_BYTES:1048576}

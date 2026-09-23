@@ -41,7 +41,8 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 @AutoConfigureMockMvc
 @Testcontainers
 @TestPropertySource(properties = {
-        "spring.jpa.hibernate.ddl-auto=validate"
+        "spring.jpa.hibernate.ddl-auto=validate",
+        "failure-event.ingestion.max-request-size-bytes=4096"
 })
 class FailureEventControllerIntegrationTest {
 
@@ -175,6 +176,41 @@ class FailureEventControllerIntegrationTest {
                 .andExpect(jsonPath("$.error").value("VALIDATION_ERROR"));
 
         assertEquals(0, failureEventRepository.count());
+    }
+
+    @Test
+    void shouldRejectOversizedJsonRequestWithoutWritingRows() throws Exception {
+        String oversizedRequest = """
+                {
+                  "serverName": "datadog",
+                  "serviceName": "Payment-Service",
+                  "environment": "production",
+                  "eventType": "ERROR",
+                  "errorMessage": "Connection timeout",
+                  "occurredAt": "2026-08-03T20:00:00Z",
+                  "rawPayload": {"details": "%s"}
+                }
+                """.formatted("x".repeat(5000));
+
+        mockMvc.perform(post("/api/v1/failure-events")
+                        .contentType(APPLICATION_JSON)
+                        .content(oversizedRequest))
+                .andExpect(status().isPayloadTooLarge());
+
+        assertEquals(0, failureEventRepository.count());
+    }
+
+    @Test
+    void shouldAcceptJsonRequestAtConfiguredSizeLimit() throws Exception {
+        String validRequest = validRequestJson();
+        String requestAtLimit = validRequest + " ".repeat(4096 - validRequest.length());
+
+        mockMvc.perform(post("/api/v1/failure-events")
+                        .contentType(APPLICATION_JSON)
+                        .content(requestAtLimit))
+                .andExpect(status().isAccepted());
+
+        assertEquals(1, failureEventRepository.count());
     }
 
     private FailureEventIngestionRequest validRequest() {
