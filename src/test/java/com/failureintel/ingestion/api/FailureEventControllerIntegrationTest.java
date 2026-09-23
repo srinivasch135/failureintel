@@ -95,6 +95,45 @@ class FailureEventControllerIntegrationTest {
     }
 
     @Test
+    void shouldDurablyCaptureMissingOrBlankErrorMessage() throws Exception {
+        String[] errorMessageValues = {"null", "\"\"", "\"   \""};
+
+        for (int index = 0; index < errorMessageValues.length; index++) {
+            String traceId = "trace-missing-message-" + index;
+            String request = """
+                    {
+                      "serverName": "datadog",
+                      "serviceName": "payment-service",
+                      "environment": "production",
+                      "eventType": "ERROR",
+                      "errorMessage": %s,
+                      "occurredAt": "2026-08-03T20:00:00Z",
+                      "traceId": "%s",
+                      "rawPayload": {"details": "original payload retained"}
+                    }
+                    """.formatted(errorMessageValues[index], traceId);
+
+            mockMvc.perform(post("/api/v1/failure-events")
+                            .contentType(APPLICATION_JSON)
+                            .content(request))
+                    .andExpect(status().isAccepted());
+
+            FailureEventEntity persisted = failureEventRepository
+                    .findFirstByTraceIdOrderByIngestedAtDescEventIdDesc(traceId)
+                    .orElseThrow();
+            assertEquals(ProcessingStatus.RECEIVED, persisted.getProcessingStatus());
+            assertEquals("{\"details\":\"original payload retained\"}", persisted.getRawPayload());
+            if (index == 0) {
+                assertNull(persisted.getMessage());
+            } else if (index == 1) {
+                assertEquals("", persisted.getMessage());
+            } else {
+                assertEquals("   ", persisted.getMessage());
+            }
+        }
+    }
+
+    @Test
     void shouldRejectIdempotencyKeyHeaderLongerThanStorageLimit() throws Exception {
         String oversizedKey = "k".repeat(FailureEventIngestionRequest.MAX_IDEMPOTENCY_KEY_LENGTH + 1);
 

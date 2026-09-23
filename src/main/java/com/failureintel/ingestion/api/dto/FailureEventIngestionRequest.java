@@ -30,7 +30,6 @@ public class FailureEventIngestionRequest {
     private String eventType;
     @Size(max = 150, message = "Error type must not exceed 150 characters")
     private String errorType;
-    @NotBlank(message = "Error message is required")
     private String errorMessage;
     @Size(max = 200, message = "Dependency target must not exceed 200 characters")
     private String dependencyTarget;
