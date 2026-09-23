@@ -3,7 +3,6 @@ package com.failureintel.ingestion.api;
 import com.failureintel.infrastructure.web.exception.GlobalExceptionHandler;
 import com.failureintel.ingestion.api.dto.FailureEventIngestionRequest;
 import com.failureintel.ingestion.api.dto.FailureEventResponse;
-import com.failureintel.ingestion.application.exception.DuplicateFailureEventException;
 import com.failureintel.ingestion.application.exception.FailureEventNotFoundException;
 import com.failureintel.ingestion.application.service.FailureEventQueryService;
 import com.failureintel.ingestion.application.useCase.IngestFailureEventUseCase;
@@ -152,28 +151,26 @@ class FailureEventControllerTest {
     }
 
     @Test
-    void shouldReturnConflictForDuplicateTraceId() throws Exception {
+    void shouldAcceptMultipleEventsWithSameTraceId() throws Exception {
+        UUID firstEventId = UUID.randomUUID();
+        UUID secondEventId = UUID.randomUUID();
         when(ingestFailureEventUseCase.ingestFailureEvent(isA(FailureEventIngestionRequest.class)))
-                .thenThrow(new DuplicateFailureEventException("trace-duplicate-001"));
+                .thenReturn(firstEventId.toString(), secondEventId.toString());
 
         mockMvc.perform(post("/api/v1/failure-events")
                 .contentType(APPLICATION_JSON)
-                .content("""
-                        {
-                          "occurredAt": "2026-08-24T10:15:30Z",
-                          "serviceName": "payment-service",
-                          "serverName": "datadog",
-                          "environment": "prod",
-                          "eventType": "error",
-                          "errorMessage": "Connection timeout",
-                          "traceId": "trace-duplicate-001",
-                          "rawPayload": {"message": "Connection timeout"}
-                        }
-                        """))
-                .andExpect(status().isConflict())
-                .andExpect(jsonPath("$.error").value("DUPLICATE_FAILURE_EVENT"))
-                .andExpect(jsonPath("$.message")
-                        .value("Failure event already exists for traceId: trace-duplicate-001"));
+                .content(validIngestionRequest("trace-shared-001")))
+                .andExpect(status().isAccepted())
+                .andExpect(jsonPath("$.eventId").value(firstEventId.toString()));
+
+        mockMvc.perform(post("/api/v1/failure-events")
+                .contentType(APPLICATION_JSON)
+                .content(validIngestionRequest("trace-shared-001")))
+                .andExpect(status().isAccepted())
+                .andExpect(jsonPath("$.eventId").value(secondEventId.toString()));
+
+        org.mockito.Mockito.verify(ingestFailureEventUseCase, org.mockito.Mockito.times(2))
+                .ingestFailureEvent(isA(FailureEventIngestionRequest.class));
     }
 
     @Test
