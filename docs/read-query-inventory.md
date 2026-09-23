@@ -27,15 +27,16 @@ A read that needs data from both records should be coordinated by an application
 
 ## Production usage
 
-Repository reads currently support ingestion duplicate checks, direct lookup by event ID, direct lookup by trace ID, and normalized search.
+Repository reads currently support idempotency checks during ingestion, direct lookup by event ID, lookup by trace ID, processing claims, and normalized search.
 
 | Caller | Method | Use | Status |
 | --- | --- | --- | --- |
-| `FailureEventIngestionService` | `FailureEventRepository.existsByTraceId(...)` | Duplicate check before ingestion | Correct repository |
+| `FailureEventIngestionService` | `FailureEventRepository.findByIdempotencyKey(...)` | Resolve explicit idempotency retries and legacy trace-based retries | Correct repository |
 | `FailureEventQueryService` | `FailureEventRepository.findById(...)` | Load the ingestion record for an event | Correct repository |
-| `FailureEventQueryService` | `FailureEventRepository.findByTraceId(...)` | Load the ingestion record for a trace | Correct repository |
+| `FailureEventQueryService` | `FailureEventRepository.findFirstByTraceIdOrderByIngestedAtDescEventIdDesc(...)` | Load the latest ingestion record for a trace | Correct repository |
 | `FailureEventQueryService` | `NormalizedFailureEventRepository.findById(...)` | Load normalized details when available | Correct repository |
 | `FailureEventQueryService` | `NormalizedFailureEventRepository.searchByFailureDetails(...)` | Search by normalized service, environment, and severity | Correct repository |
+| `FailureEventClaimService` | `FailureEventRepository.lockNextEligibleForProcessing(...)` | Lock a batch of received or due retryable events for processing | Correct repository |
 
 Methods marked with `None` in the repository tables do not have production callers yet.
 
@@ -44,12 +45,14 @@ Methods marked with `None` in the repository tables do not have production calle
 | Method | Use | Caller | Status |
 | --- | --- | --- | --- |
 | `findById(...)` | Load an ingested event by ID | `FailureEventQueryService`, integration tests | Keep |
-| `findByTraceId(...)` | Load an ingested event by trace ID | `FailureEventQueryService` | Keep |
-| `existsByTraceId(...)` | Check for duplicate ingestion | `FailureEventIngestionService` | Keep |
-| `findByProcessingStatus(...)` | Find events in a processing state | None | Keep |
-| `fetchNextBatchForProcessing(...)` | Load the next processing batch | None | Keep |
+| `findFirstByTraceIdOrderByIngestedAtDescEventIdDesc(...)` | Load the latest ingested event by trace ID | `FailureEventQueryService` | Keep |
+| `findByIdempotencyKey(...)` | Resolve explicit idempotency retries and legacy trace-based retries | `FailureEventIngestionService` | Keep |
+| `lockNextEligibleForProcessing(...)` | Lock received or due retryable events for a processing attempt | `FailureEventClaimService` | Keep |
+| `existsByTraceId(...)` | Check whether any event has a trace ID | None | Review; it is not used for ingestion deduplication |
+| `findByProcessingStatus(...)` | Find events in a processing state | Tests only | Review |
+| `fetchNextBatchForProcessing(...)` | Load events in one processing state | None | Review; claims use `lockNextEligibleForProcessing(...)` |
 | `findRecentSimilarErrors(...)` | Match service, environment, and error type | None | Review |
-| `findByOccurredAtBetween(...)` | Find ingested events in a time range | None | Keep |
+| `findByOccurredAtBetween(...)` | Find ingested events in a time range | None | Review |
 
 `updateProcessingStatus(...)` is not included because it is a write operation.
 
@@ -79,7 +82,13 @@ The ingestion integration tests load both records by event ID. They verify that 
 ## Findings
 
 - Legacy trace-based compatibility lookup uses the failure-event repository; new
-  events are not deduplicated solely by trace ID.
+  events are not deduplicated solely by trace ID. Equivalent retries can resolve
+  to an existing legacy row, while distinct events sharing a trace ID are kept.
+- Explicit idempotency keys are checked through `findByIdempotencyKey(...)`;
+  matching content resolves to the existing event and conflicting content is
+  rejected.
+- `existsByTraceId(...)` remains in the repository interface but has no
+  production caller.
 - The normalized search methods are on the correct repository.
 - The first GET endpoint reads through `FailureEventQueryService`; the controller does not select repositories.
 - `findRecentSimilarErrors(...)` is the only read method that needs an ownership decision.
