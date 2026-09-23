@@ -95,6 +95,34 @@ class FailureEventControllerIntegrationTest {
     }
 
     @Test
+    void shouldRejectIdempotencyKeyHeaderLongerThanStorageLimit() throws Exception {
+        String oversizedKey = "k".repeat(FailureEventIngestionRequest.MAX_IDEMPOTENCY_KEY_LENGTH + 1);
+
+        mockMvc.perform(post("/api/v1/failure-events")
+                        .contentType(APPLICATION_JSON)
+                        .header("Idempotency-Key", oversizedKey)
+                        .content(validRequestJson()))
+                .andExpect(status().isBadRequest());
+
+        assertEquals(0, failureEventRepository.count());
+    }
+
+    @Test
+    void shouldPersistMaximumLengthIdempotencyKeyHeaderWithinColumnLimit() throws Exception {
+        String idempotencyKey = "k".repeat(FailureEventIngestionRequest.MAX_IDEMPOTENCY_KEY_LENGTH);
+
+        mockMvc.perform(post("/api/v1/failure-events")
+                        .contentType(APPLICATION_JSON)
+                        .header("Idempotency-Key", idempotencyKey)
+                        .content(validRequestJson()))
+                .andExpect(status().isAccepted());
+
+        FailureEventEntity persisted = failureEventRepository.findAll().get(0);
+        assertEquals("key:" + idempotencyKey, persisted.getIdempotencyKey());
+        assertEquals(255, persisted.getIdempotencyKey().length());
+    }
+
+    @Test
     void shouldReturnFailureEventByIdFromDatabase() throws Exception {
         String eventId = ingestionService.ingestFailureEvent(validRequest());
 

@@ -88,6 +88,44 @@ class FailureEventControllerTest {
     }
 
     @Test
+    void shouldAcceptMaximumLengthIdempotencyKeyInBodyAndHeader() throws Exception {
+        UUID eventId = UUID.randomUUID();
+        String idempotencyKey = "k".repeat(FailureEventIngestionRequest.MAX_IDEMPOTENCY_KEY_LENGTH);
+        when(ingestFailureEventUseCase.ingestFailureEvent(isA(FailureEventIngestionRequest.class)))
+                .thenReturn(eventId.toString());
+
+        mockMvc.perform(post("/api/v1/failure-events")
+                        .contentType(APPLICATION_JSON)
+                        .content(validIngestionRequest("trace-key-body-boundary")
+                                .replace("\"rawPayload\":", "\"idempotencyKey\": \"" + idempotencyKey
+                                        + "\", \"rawPayload\":")))
+                .andExpect(status().isAccepted());
+
+        mockMvc.perform(post("/api/v1/failure-events")
+                        .contentType(APPLICATION_JSON)
+                        .header("Idempotency-Key", idempotencyKey)
+                        .content(validIngestionRequest("trace-key-header-boundary")))
+                .andExpect(status().isAccepted());
+
+        org.mockito.Mockito.verify(ingestFailureEventUseCase, org.mockito.Mockito.times(2))
+                .ingestFailureEvent(isA(FailureEventIngestionRequest.class));
+    }
+
+    @Test
+    void shouldRejectIdempotencyKeyLongerThanStorageLimitInBody() throws Exception {
+        String oversizedIdempotencyKey = "k".repeat(FailureEventIngestionRequest.MAX_IDEMPOTENCY_KEY_LENGTH + 1);
+
+        mockMvc.perform(post("/api/v1/failure-events")
+                        .contentType(APPLICATION_JSON)
+                        .content(validIngestionRequest("trace-key-body-oversized")
+                                .replace("\"rawPayload\":", "\"idempotencyKey\": \"" + oversizedIdempotencyKey
+                                        + "\", \"rawPayload\":")))
+                .andExpect(status().isBadRequest());
+
+        org.mockito.Mockito.verifyNoInteractions(ingestFailureEventUseCase);
+    }
+
+    @Test
     void shouldNotReturnAcceptedWhenRawCaptureFails() throws Exception {
         when(ingestFailureEventUseCase.ingestFailureEvent(isA(FailureEventIngestionRequest.class)))
                 .thenThrow(new DataAccessResourceFailureException("database unavailable"));

@@ -48,7 +48,8 @@ public class FailureEventController {
     public ResponseEntity<FailureEventAcceptedResponse> ingestFailureEvent(
             @Valid @RequestBody FailureEventIngestionRequest request,
             @RequestHeader(value = "Idempotency-Key", required = false)
-            @Size(max = 255, message = "Idempotency key must not exceed 255 characters") String idempotencyKey) {
+            @Size(max = FailureEventIngestionRequest.MAX_IDEMPOTENCY_KEY_LENGTH,
+                    message = "Idempotency key must not exceed 251 characters") String idempotencyKey) {
         if (idempotencyKey != null && !idempotencyKey.isBlank()) {
             request.setIdempotencyKey(idempotencyKey);
         }

@@ -2,6 +2,7 @@ package com.failureintel.infrastructure.web.exception;
 
 import com.failureintel.ingestion.application.exception.DuplicateFailureEventException;
 import com.failureintel.ingestion.application.exception.FailureEventNotFoundException;
+import jakarta.validation.ConstraintViolationException;
 import jakarta.servlet.http.HttpServletRequest;
 
 import java.time.Instant;
@@ -99,6 +100,26 @@ public class GlobalExceptionHandler {
 
                 String errorMessage = ex.getAllErrors().stream()
                                 .map(error -> error.getDefaultMessage())
+                                .collect(Collectors.joining("; "));
+
+                log.warn("VALIDATION_ERROR | {} | Path: {} | Method: {}",
+                                errorMessage,
+                                request.getRequestURI(),
+                                request.getMethod());
+
+                return build(HttpStatus.BAD_REQUEST,
+                                "VALIDATION_ERROR",
+                                errorMessage,
+                                request);
+        }
+
+        @ExceptionHandler(ConstraintViolationException.class)
+        public ResponseEntity<ApiErrorResponse> handleConstraintViolationException(
+                        ConstraintViolationException ex,
+                        HttpServletRequest request) {
+
+                String errorMessage = ex.getConstraintViolations().stream()
+                                .map(violation -> violation.getPropertyPath() + ": " + violation.getMessage())
                                 .collect(Collectors.joining("; "));
 
                 log.warn("VALIDATION_ERROR | {} | Path: {} | Method: {}",

@@ -12,6 +12,8 @@ import java.util.Map;
 @AllArgsConstructor
 @NoArgsConstructor
 public class FailureEventIngestionRequest {
+    public static final int MAX_IDEMPOTENCY_KEY_LENGTH = 251;
+
     @NotNull(message = "Occurred at is required")
     private Instant occurredAt;
     @NotNull(message = "Service name is required")
@@ -34,7 +36,7 @@ public class FailureEventIngestionRequest {
     private String dependencyTarget;
     @Size(max = 120, message = "Trace ID must not exceed 120 characters")
     private String traceId;
-    @Size(max = 255, message = "Idempotency key must not exceed 255 characters")
+    @Size(max = MAX_IDEMPOTENCY_KEY_LENGTH, message = "Idempotency key must not exceed 251 characters")
     private String idempotencyKey;
     @Size(max = 50, message = "Severity hint must not exceed 50 characters")
     private String severityHint;
