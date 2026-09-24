@@ -12,6 +12,12 @@ import java.util.Objects;
 
 public final class FailureEventEntityMapper {
 
+    public static final class MalformedRawPayloadException extends RuntimeException {
+        public MalformedRawPayloadException(String message, Throwable cause) {
+            super(message, cause);
+        }
+    }
+
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
     private FailureEventEntityMapper() {
@@ -99,7 +105,7 @@ public final class FailureEventEntityMapper {
                     rawPayload,
                     new TypeReference<Map<String, Object>>() {});
         } catch (JsonProcessingException exception) {
-            throw new IllegalArgumentException(
+            throw new MalformedRawPayloadException(
                     "Unable to deserialize persisted failure event payload",
                     exception);
         }

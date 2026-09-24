@@ -233,6 +233,26 @@ class FailureEventNormalizationProcessorIntegrationTest {
     }
 
     @Test
+    void shouldMarkUndecodablePersistedPayloadAsMalformedWithoutRetrying() {
+        UUID eventId = UUID.fromString(
+                ingestionService.ingestFailureEvent(validRequest("trace-normalization-invalid-json-001")));
+        FailureEventEntity rawEvent = failureEventRepository.findById(eventId).orElseThrow();
+        rawEvent.setRawPayload("{invalid-json");
+        failureEventRepository.saveAndFlush(rawEvent);
+
+        processingService.process(findClaim(eventId));
+
+        FailureEventEntity failedEvent = failureEventRepository.findById(eventId).orElseThrow();
+        assertEquals(ProcessingStatus.FAILED, failedEvent.getProcessingStatus());
+        assertEquals("MALFORMED_EVENT", failedEvent.getFailureCode());
+        assertEquals("Persisted raw payload could not be decoded", failedEvent.getFailureReason());
+        assertEquals(1, failedEvent.getAttemptCount());
+        assertNull(failedEvent.getNextAttemptAt());
+        assertFalse(normalizedFailureEventRepository.existsById(eventId));
+        assertEventIsNoLongerClaimable(eventId);
+    }
+
+    @Test
     void shouldPropagateUnexpectedParserFailureWithoutMarkingEventPermanentlyFailed() {
         UUID eventId = UUID.fromString(
                 ingestionService.ingestFailureEvent(validRequest("trace-normalization-parser-error-001")));

@@ -11,6 +11,7 @@ import com.failureintel.ingestion.domain.parser.FailureEventParser;
 import com.failureintel.infrastructure.persistence.failureevent.entity.FailureEventEntity;
 import com.failureintel.infrastructure.persistence.failureevent.entity.ProcessingStatus;
 import com.failureintel.infrastructure.persistence.failureevent.mapper.FailureEventEntityMapper;
+import com.failureintel.infrastructure.persistence.failureevent.mapper.FailureEventEntityMapper.MalformedRawPayloadException;
 import com.failureintel.infrastructure.persistence.failureevent.repository.FailureEventRepository;
 import com.failureintel.infrastructure.persistence.normalizedFailureEvent.entity.NormalizedFailureEventEntity;
 import com.failureintel.infrastructure.persistence.normalizedFailureEvent.mapper.NormalizedFailureEventEntityMapper;
@@ -58,7 +59,16 @@ public class FailureEventNormalizationProcessor {
 
         verifyClaimOwnership(claim, failureEvent);
 
-        RawFailureEvent rawFailureEvent = FailureEventEntityMapper.toRaw(failureEvent);
+        RawFailureEvent rawFailureEvent;
+        try {
+            rawFailureEvent = FailureEventEntityMapper.toRaw(failureEvent);
+        } catch (MalformedRawPayloadException malformedPayload) {
+            failureEvent.markFailed(
+                    MALFORMED_EVENT_CODE,
+                    "Persisted raw payload could not be decoded");
+            return;
+        }
+
         if (!failureEventParser.supports(rawFailureEvent)) {
             failureEvent.markFailed(
                     UNSUPPORTED_PAYLOAD_CODE,
