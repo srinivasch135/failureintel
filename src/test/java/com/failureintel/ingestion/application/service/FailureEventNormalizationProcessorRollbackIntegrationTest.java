@@ -1,5 +1,6 @@
 package com.failureintel.ingestion.application.service;
 
+import com.failureintel.infrastructure.persistence.failureevent.entity.FailureEventEntity;
 import com.failureintel.infrastructure.persistence.failureevent.entity.ProcessingStatus;
 import com.failureintel.infrastructure.persistence.failureevent.repository.FailureEventRepository;
 import com.failureintel.ingestion.domain.model.NormalizedFailureEvent;
@@ -29,7 +30,9 @@ import java.util.UUID;
 import static com.failureintel.test.support.FailureEventTestFixtures.validRequest;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.when;
 
@@ -58,6 +61,9 @@ class FailureEventNormalizationProcessorRollbackIntegrationTest {
 
     @Autowired
     private FailureEventNormalizationProcessor processor;
+
+    @Autowired
+    private FailureEventProcessingService processingService;
 
     @Autowired
     private FailureEventRepository failureEventRepository;
@@ -90,6 +96,32 @@ class FailureEventNormalizationProcessorRollbackIntegrationTest {
         assertEquals(
                 ProcessingStatus.PROCESSING,
                 failureEventRepository.findById(eventId).orElseThrow().getProcessingStatus());
+        assertFalse(normalizedFailureEventRepository.existsById(eventId));
+    }
+
+    @Test
+    void shouldRecordRetryableAfterNormalizedWriteTransactionRollsBack() {
+        when(failureEventNormalizer.normalize(any()))
+                .thenReturn(normalizedEventExceedingDatabaseColumnLength());
+
+        UUID eventId = UUID.fromString(
+                ingestionService.ingestFailureEvent(validRequest("trace-normalization-retry-001")));
+        ClaimedFailureEvent claim = claimService
+                .claimNextEligibleForProcessing(1)
+                .get(0);
+
+        processingService.process(claim);
+
+        FailureEventEntity persistedRawEvent = failureEventRepository.findById(eventId).orElseThrow();
+        assertEquals(eventId, claim.eventId());
+        assertEquals(ProcessingStatus.RETRYABLE, persistedRawEvent.getProcessingStatus());
+        assertEquals(1, persistedRawEvent.getAttemptCount());
+        assertEquals("NORMALIZED_WRITE_FAILURE", persistedRawEvent.getFailureCode());
+        assertEquals(
+                "Normalized failure event could not be persisted",
+                persistedRawEvent.getFailureReason());
+        assertNotNull(persistedRawEvent.getNextAttemptAt());
+        assertTrue(persistedRawEvent.getNextAttemptAt().isAfter(Instant.now()));
         assertFalse(normalizedFailureEventRepository.existsById(eventId));
     }
 
