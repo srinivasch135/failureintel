@@ -1,12 +1,17 @@
 package com.failureintel.ingestion.application.service;
 
 import com.failureintel.ingestion.application.exception.StaleFailureEventClaimException;
+import com.failureintel.ingestion.domain.model.ParsedFailureEvent;
+import com.failureintel.ingestion.domain.model.RawFailureEvent;
+import com.failureintel.ingestion.domain.parser.FailureEventParser;
+import com.failureintel.ingestion.domain.parser.GenericJsonFailureEventParser;
 import com.failureintel.infrastructure.persistence.failureevent.entity.FailureEventEntity;
 import com.failureintel.infrastructure.persistence.failureevent.entity.ProcessingStatus;
 import com.failureintel.infrastructure.persistence.failureevent.repository.FailureEventRepository;
 import com.failureintel.infrastructure.persistence.normalizedFailureEvent.entity.NormalizedFailureEventEntity;
 import com.failureintel.infrastructure.persistence.normalizedFailureEvent.repository.NormalizedFailureEventRepository;
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -14,6 +19,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
 import org.springframework.test.context.TestPropertySource;
+import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.containers.output.Slf4jLogConsumer;
 import org.testcontainers.junit.jupiter.Container;
@@ -29,6 +35,11 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.reset;
+import static org.mockito.Mockito.when;
 
 @SpringBootTest
 @Testcontainers
@@ -61,6 +72,19 @@ class FailureEventNormalizationProcessorIntegrationTest {
 
     @Autowired
     private NormalizedFailureEventRepository normalizedFailureEventRepository;
+
+    @MockitoBean
+    private FailureEventParser failureEventParser;
+
+    @BeforeEach
+    void configureParserDelegate() {
+        reset(failureEventParser);
+        GenericJsonFailureEventParser delegate = new GenericJsonFailureEventParser();
+        when(failureEventParser.supports(any(RawFailureEvent.class)))
+                .thenAnswer(invocation -> delegate.supports(invocation.getArgument(0)));
+        when(failureEventParser.parse(any(RawFailureEvent.class)))
+                .thenAnswer(invocation -> delegate.parse(invocation.getArgument(0)));
+    }
 
     @AfterEach
     void cleanUp() {
@@ -125,10 +149,30 @@ class FailureEventNormalizationProcessorIntegrationTest {
         assertEquals(ProcessingStatus.FAILED, rawEvent.getProcessingStatus());
         assertEquals("UNSUPPORTED_PAYLOAD", rawEvent.getFailureCode());
         assertFalse(normalizedFailureEventRepository.existsById(eventId));
+        assertEventIsNoLongerClaimable(eventId);
     }
 
     @Test
-    void shouldPreserveRawEventAndMarkMalformedNormalizationAsFailed() {
+    void shouldPreserveRawEventAndMarkExplicitlyMalformedParsedEventAsFailed() {
+        var request = validRequest("trace-normalization-malformed-001");
+        UUID eventId = UUID.fromString(ingestionService.ingestFailureEvent(request));
+        doAnswer(invocation -> ParsedFailureEvent.malformed(
+                invocation.getArgument(0),
+                "untrusted parser detail that must not be persisted"))
+                .when(failureEventParser).parse(any(RawFailureEvent.class));
+
+        processor.process(findClaim(eventId));
+
+        FailureEventEntity rawEvent = failureEventRepository.findById(eventId).orElseThrow();
+        assertEquals(ProcessingStatus.FAILED, rawEvent.getProcessingStatus());
+        assertEquals("MALFORMED_EVENT", rawEvent.getFailureCode());
+        assertEquals("Persisted failure event is malformed", rawEvent.getFailureReason());
+        assertFalse(normalizedFailureEventRepository.existsById(eventId));
+        assertEventIsNoLongerClaimable(eventId);
+    }
+
+    @Test
+    void shouldPreserveRawEventAndMarkEventWithInsufficientUsefulDataAsFailed() {
         var request = validRequest(null);
         request.setServiceName(" ");
         request.setEnvironment(" ");
@@ -143,7 +187,27 @@ class FailureEventNormalizationProcessorIntegrationTest {
 
         FailureEventEntity rawEvent = failureEventRepository.findById(eventId).orElseThrow();
         assertEquals(ProcessingStatus.FAILED, rawEvent.getProcessingStatus());
-        assertEquals("MALFORMED_EVENT", rawEvent.getFailureCode());
+        assertEquals("INSUFFICIENT_FAILURE_DATA", rawEvent.getFailureCode());
+        assertEquals("Event does not contain minimum useful failure data", rawEvent.getFailureReason());
+        assertFalse(normalizedFailureEventRepository.existsById(eventId));
+        assertEventIsNoLongerClaimable(eventId);
+    }
+
+    @Test
+    void shouldPropagateUnexpectedParserFailureWithoutMarkingEventPermanentlyFailed() {
+        UUID eventId = UUID.fromString(
+                ingestionService.ingestFailureEvent(validRequest("trace-normalization-parser-error-001")));
+        doAnswer(invocation -> {
+            throw new IllegalStateException("unexpected parser failure");
+        }).when(failureEventParser).parse(any(RawFailureEvent.class));
+
+        assertThrows(
+                IllegalStateException.class,
+                () -> processor.process(findClaim(eventId)));
+
+        FailureEventEntity rawEvent = failureEventRepository.findById(eventId).orElseThrow();
+        assertEquals(ProcessingStatus.PROCESSING, rawEvent.getProcessingStatus());
+        assertNull(rawEvent.getFailureCode());
         assertFalse(normalizedFailureEventRepository.existsById(eventId));
     }
 
@@ -183,5 +247,10 @@ class FailureEventNormalizationProcessorIntegrationTest {
                 .filter(claim -> claim.eventId().equals(eventId))
                 .findFirst()
                 .orElseThrow(() -> new AssertionError("Expected claim for event " + eventId));
+    }
+
+    private void assertEventIsNoLongerClaimable(UUID eventId) {
+        assertTrue(claimService.claimNextEligibleForProcessing(1).stream()
+                .noneMatch(claim -> claim.eventId().equals(eventId)));
     }
 }

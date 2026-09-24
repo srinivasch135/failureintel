@@ -369,7 +369,9 @@ Store only a bounded, sanitized reason. Log the full exception and stack trace w
 
 ## 13. Retry policy
 
-Initial defaults:
+Approved Task 10 policy (Checkpoint 0, 2026-09-24):
+
+`attempt_count` is incremented when the event is claimed. The first claim is attempt 1; the limit is five total claims. A failure after attempts 1 through 4 is eligible for retry using this schedule:
 
 | Failed attempt | Base delay |
 |---:|---:|
@@ -377,11 +379,10 @@ Initial defaults:
 | 2 | 5 minutes |
 | 3 | 30 minutes |
 | 4 | 2 hours |
-| 5 | 12 hours |
 
-After the configured maximum attempt count, transition to `FAILED` with failure code `RETRY_EXHAUSTED` while preserving the most recent sanitized cause.
+Apply bounded random jitter of up to plus or minus 20 percent of the selected base delay. The resulting `next_attempt_at` must be in the future. After attempt 5 fails with a retryable failure, transition to `FAILED` with failure code `RETRY_EXHAUSTED`, preserve the last sanitized cause, and do not schedule another attempt. Permanent data failures retain their specific failure code and become `FAILED` immediately.
 
-Add bounded random jitter to each base delay to avoid synchronized retry spikes. Make the maximum attempts, delays, worker interval, batch size, and lease timeout external configuration.
+Normalized-event persistence failures use stable failure code `NORMALIZED_WRITE_FAILURE` and are retryable under this policy, including deterministic constraint failures. They therefore reach `RETRY_EXHAUSTED` after the fifth failed claim unless a retry succeeds. Make the maximum attempts, delays, and jitter bound external configuration under the existing `failure-event` configuration namespace. Use an injected clock and controlled jitter source so retry-time calculation can be tested without wall-clock sleeps.
 
 ## 14. Crash and lease recovery
 
