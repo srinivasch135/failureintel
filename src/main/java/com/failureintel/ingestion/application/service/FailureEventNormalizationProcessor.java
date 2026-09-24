@@ -26,6 +26,7 @@ public class FailureEventNormalizationProcessor {
 
     private static final String UNSUPPORTED_PAYLOAD_CODE = "UNSUPPORTED_PAYLOAD";
     private static final String MALFORMED_EVENT_CODE = "MALFORMED_EVENT";
+    private static final String INSUFFICIENT_FAILURE_DATA_CODE = "INSUFFICIENT_FAILURE_DATA";
 
     private final FailureEventRepository failureEventRepository;
     private final NormalizedFailureEventRepository normalizedFailureEventRepository;
@@ -66,13 +67,27 @@ public class FailureEventNormalizationProcessor {
         }
 
         ParsedFailureEvent parsedFailureEvent = failureEventParser.parse(rawFailureEvent);
+        if (parsedFailureEvent.isMalformed()) {
+            failureEvent.markFailed(
+                    MALFORMED_EVENT_CODE,
+                    "Persisted failure event is malformed");
+            return;
+        }
+
+        if (!parsedFailureEvent.hasMinimumUsefulData()) {
+            failureEvent.markFailed(
+                    INSUFFICIENT_FAILURE_DATA_CODE,
+                    "Event does not contain minimum useful failure data");
+            return;
+        }
+
         NormalizedFailureEvent normalizedFailureEvent =
                 failureEventNormalizer.normalize(parsedFailureEvent);
 
         if (normalizedFailureEvent.getNormalizationStatus() == NormalizationStatus.MALFORMED) {
             failureEvent.markFailed(
                     MALFORMED_EVENT_CODE,
-                    "Event does not contain minimum useful failure data");
+                    "Normalization determined the parsed failure event is malformed");
             return;
         }
 

@@ -58,3 +58,8 @@ server:
 failure-event:
   ingestion:
     max-request-size-bytes: ${FAILURE_EVENT_MAX_REQUEST_SIZE_BYTES:1048576}
+  processing:
+    retry:
+      max-attempts: ${FAILURE_EVENT_RETRY_MAX_ATTEMPTS:5}
+      delays: ${FAILURE_EVENT_RETRY_DELAYS:PT1M,PT5M,PT30M,PT2H}
+      jitter-fraction: ${FAILURE_EVENT_RETRY_JITTER_FRACTION:0.2}
