@@ -10,6 +10,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
+import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.TestPropertySource;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -20,9 +21,11 @@ import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.utility.DockerImageName;
 
+import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
@@ -33,6 +36,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -40,7 +44,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @SpringBootTest
 @Testcontainers
-@TestPropertySource(properties = "spring.jpa.hibernate.ddl-auto=validate")
+@TestPropertySource(properties = {
+        "spring.jpa.hibernate.ddl-auto=validate",
+        "failure-event.processing.retry.max-attempts=5"
+})
 class FailureEventClaimServiceIntegrationTest {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(FailureEventClaimServiceIntegrationTest.class);
@@ -57,6 +64,12 @@ class FailureEventClaimServiceIntegrationTest {
 
     @Autowired
     private FailureEventClaimService claimService;
+
+    @Autowired
+    private FailureEventRetryStateRecorder retryStateRecorder;
+
+    @Autowired
+    private FailureEventRetryPolicy retryPolicy;
 
     @Autowired
     private FailureEventRepository failureEventRepository;
@@ -203,6 +216,163 @@ class FailureEventClaimServiceIntegrationTest {
         } finally {
             releaseLock.countDown();
             executor.shutdownNow();
+        }
+    }
+
+    @Test
+    void shouldAdvanceAttemptsAndExhaustExactlyAtConfiguredMaximum() {
+        FailureEventEntity event = persistEvent(
+                "retry-limit-boundary",
+                ProcessingStatus.RECEIVED,
+                Instant.parse("2026-09-15T10:00:00Z"));
+        int maxAttempts = retryPolicy.getMaxAttempts();
+
+        for (int expectedAttempt = 1; expectedAttempt <= maxAttempts; expectedAttempt++) {
+            List<ClaimedFailureEvent> claims = claimService.claimNextEligibleForProcessing(1);
+            assertEquals(1, claims.size());
+            ClaimedFailureEvent claim = claims.get(0);
+            assertEquals(event.getEventId(), claim.eventId());
+            assertEquals(expectedAttempt, claim.attemptNumber());
+
+            Optional<Instant> nextAttemptAt = retryPolicy.nextAttemptAt(expectedAttempt);
+            assertEquals(expectedAttempt < maxAttempts, nextAttemptAt.isPresent());
+            assertTrue(retryStateRecorder.recordFailure(
+                    claim,
+                    FailureEventRetryableFailure.DATABASE_TIMEOUT,
+                    nextAttemptAt));
+
+            FailureEventEntity persisted = failureEventRepository.findById(event.getEventId()).orElseThrow();
+            assertEquals(expectedAttempt, persisted.getAttemptCount());
+            if (expectedAttempt < maxAttempts) {
+                assertEquals(ProcessingStatus.RETRYABLE, persisted.getProcessingStatus());
+                jdbcTemplate.update(
+                        "UPDATE failure_event SET next_attempt_at = ? WHERE event_id = ?",
+                        Timestamp.from(Instant.now().minusSeconds(1)),
+                        event.getEventId());
+            } else {
+                assertEquals(ProcessingStatus.FAILED, persisted.getProcessingStatus());
+                assertEquals("RETRY_EXHAUSTED", persisted.getFailureCode());
+                assertNull(persisted.getNextAttemptAt());
+            }
+        }
+
+        assertTrue(claimService.claimNextEligibleForProcessing(1).isEmpty());
+    }
+
+    @Test
+    void shouldTerminalizeRetryableRowAtLimitEvenWhenItsRetryTimeIsInTheFuture() {
+        FailureEventEntity event = persistRetryableEvent(
+                "retry-limit-config-change",
+                Instant.parse("2026-09-15T10:00:00Z"),
+                Instant.parse("2999-01-01T00:00:00Z"));
+        int exhaustedAttemptCount = retryPolicy.getMaxAttempts();
+        jdbcTemplate.update(
+                "UPDATE failure_event SET attempt_count = ?, version = version + 1 WHERE event_id = ?",
+                exhaustedAttemptCount,
+                event.getEventId());
+
+        assertTrue(claimService.claimNextEligibleForProcessing(1).isEmpty());
+
+        FailureEventEntity persisted = failureEventRepository.findById(event.getEventId()).orElseThrow();
+        assertEquals(ProcessingStatus.FAILED, persisted.getProcessingStatus());
+        assertEquals(exhaustedAttemptCount, persisted.getAttemptCount());
+        assertEquals("RETRY_EXHAUSTED", persisted.getFailureCode());
+        assertNull(persisted.getNextAttemptAt());
+        assertTrue(claimService.claimNextEligibleForProcessing(1).isEmpty());
+    }
+
+    @Test
+    void shouldRecordOnlyOneFailureForDuplicateCallsUsingTheSameClaim() {
+        FailureEventEntity event = persistEvent(
+                "duplicate-retry-record",
+                ProcessingStatus.RECEIVED,
+                Instant.parse("2026-09-15T10:00:00Z"));
+        ClaimedFailureEvent claim = claimService.claimNextEligibleForProcessing(1).get(0);
+        Optional<Instant> retryAt = Optional.of(Instant.now().plusSeconds(60));
+
+        assertTrue(retryStateRecorder.recordFailure(
+                claim,
+                FailureEventRetryableFailure.DATABASE_TIMEOUT,
+                retryAt));
+        assertFalse(retryStateRecorder.recordFailure(
+                claim,
+                FailureEventRetryableFailure.DATABASE_UNAVAILABLE,
+                retryAt));
+
+        FailureEventEntity persisted = failureEventRepository.findById(event.getEventId()).orElseThrow();
+        assertEquals(ProcessingStatus.RETRYABLE, persisted.getProcessingStatus());
+        assertEquals(1, persisted.getAttemptCount());
+        assertEquals("DATABASE_TIMEOUT", persisted.getFailureCode());
+    }
+
+    @Test
+    void shouldIgnoreFailureFromAnOlderClaimAfterANewerAttemptHasStarted() {
+        FailureEventEntity event = persistEvent(
+                "stale-retry-record",
+                ProcessingStatus.RECEIVED,
+                Instant.parse("2026-09-15T10:00:00Z"));
+        ClaimedFailureEvent oldClaim = claimService.claimNextEligibleForProcessing(1).get(0);
+        assertTrue(retryStateRecorder.recordFailure(
+                oldClaim,
+                FailureEventRetryableFailure.DATABASE_TIMEOUT,
+                Optional.of(Instant.now().minusSeconds(1))));
+
+        ClaimedFailureEvent currentClaim = claimService.claimNextEligibleForProcessing(1).get(0);
+        assertEquals(2, currentClaim.attemptNumber());
+        assertFalse(retryStateRecorder.recordFailure(
+                oldClaim,
+                FailureEventRetryableFailure.DATABASE_UNAVAILABLE,
+                Optional.of(Instant.now().plusSeconds(60))));
+
+        FailureEventEntity persisted = failureEventRepository.findById(event.getEventId()).orElseThrow();
+        assertEquals(ProcessingStatus.PROCESSING, persisted.getProcessingStatus());
+        assertEquals(2, persisted.getAttemptCount());
+        assertNull(persisted.getFailureCode());
+        assertNull(persisted.getNextAttemptAt());
+    }
+
+    @Test
+    void shouldAllowOnlyOneCompetingFailureUpdateForTheSameClaim() throws Exception {
+        FailureEventEntity event = persistEvent(
+                "concurrent-retry-record",
+                ProcessingStatus.RECEIVED,
+                Instant.parse("2026-09-15T10:00:00Z"));
+        ClaimedFailureEvent claim = claimService.claimNextEligibleForProcessing(1).get(0);
+        CountDownLatch start = new CountDownLatch(1);
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try {
+            Future<Boolean> first = executor.submit(() -> recordAfter(
+                    start, claim, FailureEventRetryableFailure.DATABASE_TIMEOUT));
+            Future<Boolean> second = executor.submit(() -> recordAfter(
+                    start, claim, FailureEventRetryableFailure.DATABASE_UNAVAILABLE));
+            start.countDown();
+
+            int successfulUpdates = (first.get(10, TimeUnit.SECONDS) ? 1 : 0)
+                    + (second.get(10, TimeUnit.SECONDS) ? 1 : 0);
+            assertEquals(1, successfulUpdates);
+        } finally {
+            executor.shutdownNow();
+        }
+
+        FailureEventEntity persisted = failureEventRepository.findById(event.getEventId()).orElseThrow();
+        assertEquals(ProcessingStatus.RETRYABLE, persisted.getProcessingStatus());
+        assertEquals(1, persisted.getAttemptCount());
+        assertTrue(List.of("DATABASE_TIMEOUT", "DATABASE_UNAVAILABLE")
+                .contains(persisted.getFailureCode()));
+    }
+
+    private boolean recordAfter(
+            CountDownLatch start,
+            ClaimedFailureEvent claim,
+            FailureEventRetryableFailure failure) throws InterruptedException {
+        assertTrue(start.await(5, TimeUnit.SECONDS));
+        try {
+            return retryStateRecorder.recordFailure(
+                    claim,
+                    failure,
+                    Optional.of(Instant.now().plusSeconds(60)));
+        } catch (OptimisticLockingFailureException exception) {
+            return false;
         }
     }
 

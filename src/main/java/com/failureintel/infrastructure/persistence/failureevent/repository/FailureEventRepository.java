@@ -49,15 +49,19 @@ public interface FailureEventRepository extends JpaRepository<FailureEventEntity
                         WHERE fe.processing_status = 'RECEIVED'
                            OR (
                                 fe.processing_status = 'RETRYABLE'
-                                AND fe.next_attempt_at <= :eligibleAt
+                                AND (
+                                    fe.next_attempt_at <= :eligibleAt
+                                    OR fe.attempt_count >= :maxAttempts
+                                )
                            )
                         ORDER BY fe.ingested_at ASC, fe.event_id ASC
                         LIMIT :batchSize
                         FOR UPDATE SKIP LOCKED
                         """, nativeQuery = true)
         List<FailureEventEntity> lockNextEligibleForProcessing(
-                @Param("eligibleAt") Instant eligibleAt,
-                @Param("batchSize") int batchSize);
+                        @Param("eligibleAt") Instant eligibleAt,
+                        @Param("batchSize") int batchSize,
+                        @Param("maxAttempts") int maxAttempts);
 
         Page<FailureEventEntity> findByOccurredAtBetween(
                         Instant start,

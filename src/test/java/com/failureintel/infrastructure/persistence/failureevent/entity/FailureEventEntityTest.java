@@ -134,6 +134,38 @@ class FailureEventEntityTest {
     }
 
     @Test
+    void shouldMarkFinalProcessingAttemptAsRetryExhausted() {
+        FailureEventEntity entity = entityWithStatus(ProcessingStatus.PROCESSING);
+        entity.setAttemptCount(5);
+        entity.setProcessingStartedAt(FIRST_ATTEMPT);
+
+        entity.markRetryExhausted(" DATABASE_TIMEOUT ", " database operation timed out ");
+
+        assertEquals(ProcessingStatus.FAILED, entity.getProcessingStatus());
+        assertEquals(5, entity.getAttemptCount());
+        assertEquals("RETRY_EXHAUSTED", entity.getFailureCode());
+        assertEquals(
+                "Automatic retries exhausted after DATABASE_TIMEOUT: database operation timed out",
+                entity.getFailureReason());
+        assertNull(entity.getProcessingStartedAt());
+        assertNull(entity.getNextAttemptAt());
+    }
+
+    @Test
+    void shouldTerminalizeAlreadyRetryableExhaustedEventWithoutIncrementingAttempts() {
+        FailureEventEntity entity = entityWithStatus(ProcessingStatus.RETRYABLE);
+        entity.setAttemptCount(5);
+        entity.setNextAttemptAt(RETRY_AT);
+
+        entity.markRetryExhausted("DATABASE_TIMEOUT", "database operation timed out");
+
+        assertEquals(ProcessingStatus.FAILED, entity.getProcessingStatus());
+        assertEquals(5, entity.getAttemptCount());
+        assertEquals("RETRY_EXHAUSTED", entity.getFailureCode());
+        assertNull(entity.getNextAttemptAt());
+    }
+
+    @Test
     void shouldRecoverProcessingLeaseAsRetryableAndClearLeaseMetadata() {
         FailureEventEntity entity = entityWithStatus(ProcessingStatus.PROCESSING);
         entity.setProcessingStartedAt(FIRST_ATTEMPT);
@@ -167,7 +199,6 @@ class FailureEventEntityTest {
         Stream.of(
                         ProcessingStatus.RECEIVED,
                         ProcessingStatus.NORMALIZED,
-                        ProcessingStatus.RETRYABLE,
                         ProcessingStatus.QUEUED,
                         ProcessingStatus.PROCESSED,
                         ProcessingStatus.FAILED)
@@ -181,6 +212,9 @@ class FailureEventEntityTest {
                     assertThrows(
                             IllegalStateException.class,
                             () -> entity.markFailed("PERMANENT_FAILURE", "permanent"));
+                    assertThrows(
+                            IllegalStateException.class,
+                            () -> entity.markRetryExhausted("TEMPORARY_FAILURE", "temporary"));
                     assertThrows(
                             IllegalStateException.class,
                             () -> entity.recoverExpiredLease(

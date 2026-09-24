@@ -16,8 +16,6 @@ import java.util.Optional;
 @Service
 public class FailureEventRetryStateRecorder {
 
-    private static final String RETRY_EXHAUSTED_CODE = "RETRY_EXHAUSTED";
-
     private final FailureEventRepository failureEventRepository;
 
     public FailureEventRetryStateRecorder(FailureEventRepository failureEventRepository) {
@@ -51,12 +49,7 @@ public class FailureEventRetryStateRecorder {
                     failure.getReason(),
                     nextAttemptAt.get());
         } else {
-            event.markFailed(
-                    RETRY_EXHAUSTED_CODE,
-                    "Automatic retries exhausted after "
-                            + failure.getCode()
-                            + ": "
-                            + failure.getReason());
+            event.markRetryExhausted(failure.getCode(), failure.getReason());
         }
 
         // save() participates in this service transaction; do not use the

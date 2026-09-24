@@ -14,6 +14,8 @@ import java.util.UUID;
 @Table(name = "failure_event")
 public class FailureEventEntity {
 
+    private static final String RETRY_EXHAUSTED_CODE = "RETRY_EXHAUSTED";
+
     @Id
     @Column(name = "event_id", nullable = false, updatable = false)
     private UUID eventId;
@@ -327,6 +329,20 @@ public class FailureEventEntity {
         this.nextAttemptAt = null;
         this.failureCode = failureCode.trim();
         this.failureReason = failureReason.trim();
+    }
+
+    public void markRetryExhausted(String lastFailureCode, String lastFailureReason) {
+        requireFailureDetails(lastFailureCode, lastFailureReason);
+        requireStatus(ProcessingStatus.PROCESSING, ProcessingStatus.RETRYABLE);
+
+        this.processingStatus = ProcessingStatus.FAILED;
+        this.processingStartedAt = null;
+        this.nextAttemptAt = null;
+        this.failureCode = RETRY_EXHAUSTED_CODE;
+        this.failureReason = "Automatic retries exhausted after "
+                + lastFailureCode.trim()
+                + ": "
+                + lastFailureReason.trim();
     }
 
     public void recoverExpiredLease(String failureCode, String failureReason, Instant nextAttemptAt) {

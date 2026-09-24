@@ -1,5 +1,6 @@
 package com.failureintel.ingestion.application.service;
 
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
@@ -22,6 +23,7 @@ public class FailureEventRetryPolicy {
     private final Clock clock;
     private final DoubleSupplier randomValue;
 
+    @Autowired
     public FailureEventRetryPolicy(
             @Value("${failure-event.processing.retry.max-attempts:5}") int maxAttempts,
             @Value("${failure-event.processing.retry.delays:PT1M,PT5M,PT30M,PT2H}") String retryDelays,

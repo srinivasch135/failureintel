@@ -18,6 +18,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.TestPropertySource;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.testcontainers.containers.PostgreSQLContainer;
@@ -43,7 +44,10 @@ import static org.mockito.Mockito.when;
 
 @SpringBootTest
 @Testcontainers
-@TestPropertySource(properties = "spring.jpa.hibernate.ddl-auto=validate")
+@TestPropertySource(properties = {
+        "spring.jpa.hibernate.ddl-auto=validate",
+        "failure-event.processing.retry.max-attempts=5"
+})
 class FailureEventNormalizationProcessorIntegrationTest {
 
     private static final Logger LOGGER =
@@ -68,10 +72,16 @@ class FailureEventNormalizationProcessorIntegrationTest {
     private FailureEventNormalizationProcessor processor;
 
     @Autowired
+    private FailureEventProcessingService processingService;
+
+    @Autowired
     private FailureEventRepository failureEventRepository;
 
     @Autowired
     private NormalizedFailureEventRepository normalizedFailureEventRepository;
+
+    @Autowired
+    private JdbcTemplate jdbcTemplate;
 
     @MockitoBean
     private FailureEventParser failureEventParser;
@@ -150,6 +160,35 @@ class FailureEventNormalizationProcessorIntegrationTest {
         assertEquals("UNSUPPORTED_PAYLOAD", rawEvent.getFailureCode());
         assertFalse(normalizedFailureEventRepository.existsById(eventId));
         assertEventIsNoLongerClaimable(eventId);
+    }
+
+    @Test
+    void shouldPreservePermanentFailureCodeOnTheFinalAllowedAttempt() {
+        var request = validRequest("trace-normalization-permanent-last-attempt-001");
+        request.setRawPayload(java.util.Map.of());
+        UUID eventId = UUID.fromString(ingestionService.ingestFailureEvent(request));
+
+        ClaimedFailureEvent firstClaim = findClaim(eventId);
+        FailureEventEntity event = failureEventRepository.findById(eventId).orElseThrow();
+        event.markRetryable(
+                "DATABASE_TIMEOUT",
+                "database operation timed out",
+                Instant.now().minusSeconds(1));
+        failureEventRepository.saveAndFlush(event);
+        jdbcTemplate.update(
+                "UPDATE failure_event SET attempt_count = 4, version = version + 1 WHERE event_id = ?",
+                eventId);
+
+        ClaimedFailureEvent finalClaim = findClaim(eventId);
+        assertEquals(1, firstClaim.attemptNumber());
+        assertEquals(5, finalClaim.attemptNumber());
+        processingService.process(finalClaim);
+
+        FailureEventEntity persisted = failureEventRepository.findById(eventId).orElseThrow();
+        assertEquals(ProcessingStatus.FAILED, persisted.getProcessingStatus());
+        assertEquals(5, persisted.getAttemptCount());
+        assertEquals("UNSUPPORTED_PAYLOAD", persisted.getFailureCode());
+        assertEquals("No parser supports the persisted failure event", persisted.getFailureReason());
     }
 
     @Test

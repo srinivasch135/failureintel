@@ -1,21 +1,27 @@
 package com.failureintel.ingestion.application.service;
 
 import com.failureintel.infrastructure.persistence.failureevent.entity.FailureEventEntity;
+import com.failureintel.infrastructure.persistence.failureevent.entity.ProcessingStatus;
 import com.failureintel.infrastructure.persistence.failureevent.repository.FailureEventRepository;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 
 @Service
 public class FailureEventClaimService {
 
     private final FailureEventRepository failureEventRepository;
+    private final FailureEventRetryPolicy retryPolicy;
 
-    public FailureEventClaimService(FailureEventRepository failureEventRepository) {
+    public FailureEventClaimService(
+            FailureEventRepository failureEventRepository,
+            FailureEventRetryPolicy retryPolicy) {
         this.failureEventRepository = failureEventRepository;
+        this.retryPolicy = retryPolicy;
     }
 
     /**
@@ -30,15 +36,22 @@ public class FailureEventClaimService {
         }
 
         Instant claimedAt = Instant.now();
+        int maxAttempts = retryPolicy.getMaxAttempts();
         List<FailureEventEntity> candidates = failureEventRepository
-                .lockNextEligibleForProcessing(claimedAt, batchSize);
+                .lockNextEligibleForProcessing(claimedAt, batchSize, maxAttempts);
 
-        candidates.forEach(event -> event.claimForProcessing(claimedAt));
+        List<ClaimedFailureEvent> claims = new ArrayList<>(candidates.size());
+        for (FailureEventEntity event : candidates) {
+            if (event.getProcessingStatus() == ProcessingStatus.RETRYABLE
+                    && event.getAttemptCount() >= maxAttempts) {
+                event.markRetryExhausted(event.getFailureCode(), event.getFailureReason());
+                continue;
+            }
 
-        return candidates.stream()
-                .map(event -> new ClaimedFailureEvent(
-                        event.getEventId(),
-                        event.getAttemptCount()))
-                .toList();
+            event.claimForProcessing(claimedAt);
+            claims.add(new ClaimedFailureEvent(event.getEventId(), event.getAttemptCount()));
+        }
+
+        return List.copyOf(claims);
     }
 }
