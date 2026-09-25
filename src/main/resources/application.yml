@@ -59,6 +59,12 @@ failure-event:
   ingestion:
     max-request-size-bytes: ${FAILURE_EVENT_MAX_REQUEST_SIZE_BYTES:1048576}
   processing:
+    worker:
+      enabled: ${FAILURE_EVENT_WORKER_ENABLED:false}
+      fixed-delay: ${FAILURE_EVENT_WORKER_FIXED_DELAY:2s}
+      batch-size: ${FAILURE_EVENT_WORKER_BATCH_SIZE:8}
+      concurrency: ${FAILURE_EVENT_WORKER_CONCURRENCY:2}
+      shutdown-await: ${FAILURE_EVENT_WORKER_SHUTDOWN_AWAIT:30s}
     retry:
       max-attempts: ${FAILURE_EVENT_RETRY_MAX_ATTEMPTS:5}
       delays: ${FAILURE_EVENT_RETRY_DELAYS:PT1M,PT5M,PT30M,PT2H}
