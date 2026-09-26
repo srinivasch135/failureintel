@@ -14,11 +14,16 @@ import org.springframework.context.annotation.Import;
 import org.springframework.scheduling.annotation.EnableScheduling;
 import org.springframework.scheduling.annotation.ScheduledAnnotationBeanPostProcessor;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
+import org.springframework.transaction.annotation.Transactional;
 
-import java.time.Duration;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
@@ -26,10 +31,13 @@ import java.util.concurrent.atomic.AtomicReference;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
-import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 class FailureEventProcessingWorkerTest {
@@ -37,6 +45,9 @@ class FailureEventProcessingWorkerTest {
     private final ApplicationContextRunner contextRunner = new ApplicationContextRunner()
             .withInitializer(new ConfigDataApplicationContextInitializer())
             .withUserConfiguration(WorkerConfiguration.class);
+    private final ApplicationContextRunner executionContextRunner = new ApplicationContextRunner()
+            .withInitializer(new ConfigDataApplicationContextInitializer())
+            .withUserConfiguration(WorkerExecutionConfiguration.class);
 
     @Test
     void shouldNotRegisterOrScheduleWorkerWhenDisabled() {
@@ -100,7 +111,7 @@ class FailureEventProcessingWorkerTest {
         CountDownLatch taskFinished = new CountDownLatch(1);
         AtomicBoolean taskWasInterrupted = new AtomicBoolean();
 
-        contextRunner
+        executionContextRunner
                 .withPropertyValues(
                         "failure-event.processing.worker.enabled=true",
                         "failure-event.processing.worker.fixed-delay=1h",
@@ -159,34 +170,118 @@ class FailureEventProcessingWorkerTest {
     }
 
     @Test
-    void shouldProcessClaimsIndividuallyAndContinueAfterAnAttemptThrows() {
-        FailureEventClaimService claimService = mock(FailureEventClaimService.class);
-        FailureEventProcessingService processingService = mock(FailureEventProcessingService.class);
-        FailureEventWorkerProperties properties = new FailureEventWorkerProperties(
-                true,
-                Duration.ofSeconds(2),
-                2,
-                1,
-                Duration.ofSeconds(30));
-        ClaimedFailureEvent failedClaim = new ClaimedFailureEvent(UUID.randomUUID(), 1);
-        ClaimedFailureEvent followingClaim = new ClaimedFailureEvent(UUID.randomUUID(), 1);
-        when(claimService.claimNextEligibleForProcessing(2))
-                .thenReturn(List.of(failedClaim, followingClaim));
-        doThrow(new IllegalStateException("simulated processing-service failure"))
-                .when(processingService)
-                .process(failedClaim);
+    void shouldReturnQuietlyWhenNoClaimsAreAvailable() throws NoSuchMethodException {
+        executionContextRunner
+                .withPropertyValues(
+                        "failure-event.processing.worker.enabled=true",
+                        "failure-event.processing.worker.fixed-delay=1h",
+                        "failure-event.processing.worker.batch-size=4")
+                .run(context -> {
+                    FailureEventProcessingWorker worker = context.getBean(FailureEventProcessingWorker.class);
+                    FailureEventClaimService claimService = context.getBean(FailureEventClaimService.class);
+                    FailureEventProcessingService processingService = context.getBean(
+                            FailureEventProcessingService.class);
 
-        new FailureEventProcessingWorker(claimService, processingService, properties).processNextBatch();
+                    worker.processNextBatch();
 
-        verify(claimService).claimNextEligibleForProcessing(2);
-        verify(processingService).process(failedClaim);
-        verify(processingService).process(followingClaim);
+                    verify(claimService, times(1)).claimNextEligibleForProcessing(4);
+                    verifyNoInteractions(processingService);
+                    assertEquals(0, context.getBean(
+                            "failureEventNormalizationExecutor",
+                            ThreadPoolTaskExecutor.class).getThreadPoolExecutor().getTaskCount());
+                    assertFalse(FailureEventProcessingWorker.class.getMethod("processNextBatch")
+                            .isAnnotationPresent(Transactional.class));
+                });
+    }
+
+    @Test
+    void shouldSubmitTheWholeBatchAndAwaitEveryAttemptWhenOneFails() throws Exception {
+        List<ClaimedFailureEvent> claims = List.of(
+                new ClaimedFailureEvent(UUID.randomUUID(), 1),
+                new ClaimedFailureEvent(UUID.randomUUID(), 1),
+                new ClaimedFailureEvent(UUID.randomUUID(), 1));
+        ClaimedFailureEvent failedClaim = claims.get(1);
+        CountDownLatch allTasksStarted = new CountDownLatch(claims.size());
+        CountDownLatch allowFailedTaskToFinish = new CountDownLatch(1);
+        CountDownLatch failedTaskFinished = new CountDownLatch(1);
+        CountDownLatch allowSuccessfulTasksToFinish = new CountDownLatch(1);
+        CountDownLatch successfulTasksFinished = new CountDownLatch(claims.size() - 1);
+        Set<String> processingThreadNames = ConcurrentHashMap.newKeySet();
+        AtomicReference<String> scheduledThreadName = new AtomicReference<>();
+
+        executionContextRunner
+                .withPropertyValues(
+                        "failure-event.processing.worker.enabled=true",
+                        "failure-event.processing.worker.fixed-delay=1h",
+                        "failure-event.processing.worker.batch-size=3",
+                        "failure-event.processing.worker.concurrency=3")
+                .run(context -> {
+                    FailureEventProcessingWorker worker = context.getBean(FailureEventProcessingWorker.class);
+                    FailureEventClaimService claimService = context.getBean(FailureEventClaimService.class);
+                    FailureEventProcessingService processingService = context.getBean(
+                            FailureEventProcessingService.class);
+                    when(claimService.claimNextEligibleForProcessing(3)).thenReturn(claims);
+                    doAnswer(invocation -> {
+                        ClaimedFailureEvent claim = invocation.getArgument(0);
+                        processingThreadNames.add(Thread.currentThread().getName());
+                        allTasksStarted.countDown();
+                        if (claim.equals(failedClaim)) {
+                            awaitLatch(allowFailedTaskToFinish);
+                            failedTaskFinished.countDown();
+                            throw new IllegalStateException("simulated processing failure");
+                        }
+                        awaitLatch(allowSuccessfulTasksToFinish);
+                        successfulTasksFinished.countDown();
+                        return null;
+                    }).when(processingService).process(any(ClaimedFailureEvent.class));
+
+                    ExecutorService scheduledThread = Executors.newSingleThreadExecutor();
+                    try {
+                        Future<?> cycle = scheduledThread.submit(() -> {
+                            scheduledThreadName.set(Thread.currentThread().getName());
+                            worker.processNextBatch();
+                        });
+
+                        assertTrue(allTasksStarted.await(3, TimeUnit.SECONDS),
+                                "Every claimed event should be submitted before the worker waits");
+                        verify(claimService, times(1)).claimNextEligibleForProcessing(3);
+                        for (ClaimedFailureEvent claim : claims) {
+                            verify(processingService, times(1)).process(claim);
+                        }
+                        assertEquals(claims.size(), processingThreadNames.size());
+                        assertTrue(processingThreadNames.stream()
+                                .allMatch(name -> name.startsWith("failure-event-normalization-")));
+                        assertFalse(processingThreadNames.contains(scheduledThreadName.get()));
+
+                        allowFailedTaskToFinish.countDown();
+                        assertTrue(failedTaskFinished.await(2, TimeUnit.SECONDS));
+                        assertFalse(cycle.isDone(),
+                                "The cycle must continue waiting for the other attempts after one fails");
+
+                        allowSuccessfulTasksToFinish.countDown();
+                        assertTrue(successfulTasksFinished.await(2, TimeUnit.SECONDS));
+                        cycle.get(2, TimeUnit.SECONDS);
+                    } finally {
+                        allowSuccessfulTasksToFinish.countDown();
+                        allowFailedTaskToFinish.countDown();
+                        scheduledThread.shutdownNow();
+                    }
+                });
+    }
+
+    private static void awaitLatch(CountDownLatch latch) {
+        try {
+            latch.await();
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("Interrupted during worker test", interrupted);
+        }
     }
 
     @Configuration(proxyBeanMethods = false)
     @EnableScheduling
     @EnableConfigurationProperties(FailureEventWorkerProperties.class)
-    @Import(FailureEventWorkerExecutorConfiguration.class)
+    @Import({FailureEventWorkerExecutorConfiguration.class, WorkerMocksConfiguration.class})
     @ComponentScan(
             basePackageClasses = FailureEventProcessingWorker.class,
             useDefaultFilters = false,
@@ -194,7 +289,20 @@ class FailureEventProcessingWorkerTest {
                     type = FilterType.ASSIGNABLE_TYPE,
                     classes = FailureEventProcessingWorker.class))
     static class WorkerConfiguration {
+    }
 
+    @Configuration(proxyBeanMethods = false)
+    @EnableConfigurationProperties(FailureEventWorkerProperties.class)
+    @Import({
+        FailureEventWorkerExecutorConfiguration.class,
+        FailureEventProcessingWorker.class,
+        WorkerMocksConfiguration.class
+    })
+    static class WorkerExecutionConfiguration {
+    }
+
+    @Configuration(proxyBeanMethods = false)
+    static class WorkerMocksConfiguration {
         @Bean
         FailureEventClaimService failureEventClaimService() {
             FailureEventClaimService claimService = mock(FailureEventClaimService.class);
