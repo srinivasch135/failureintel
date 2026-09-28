@@ -331,6 +331,105 @@ class FailureEventClaimServiceIntegrationTest {
     }
 
     @Test
+    void shouldUseLastAttemptThenIngestedAtWhenProcessingStartIsMissing() {
+        Instant oldTimestamp = Instant.now().minusSeconds(3600);
+        FailureEventEntity lastAttemptFallback = persistProcessingEvent(
+                "missing-start-last-attempt-fallback",
+                oldTimestamp);
+        FailureEventEntity ingestionFallback = persistProcessingEvent(
+                "missing-start-ingested-at-fallback",
+                oldTimestamp.minusSeconds(60));
+        FailureEventEntity recentLastAttempt = persistProcessingEvent(
+                "missing-start-recent-last-attempt",
+                oldTimestamp.minusSeconds(120));
+
+        jdbcTemplate.update(
+                "UPDATE failure_event SET processing_started_at = NULL, version = version + 1 WHERE event_id = ?",
+                lastAttemptFallback.getEventId());
+        jdbcTemplate.update(
+                "UPDATE failure_event SET processing_started_at = NULL, last_attempt_at = NULL, "
+                        + "version = version + 1 WHERE event_id = ?",
+                ingestionFallback.getEventId());
+        jdbcTemplate.update(
+                "UPDATE failure_event SET processing_started_at = NULL, "
+                        + "last_attempt_at = CURRENT_TIMESTAMP + INTERVAL '1 day', "
+                        + "version = version + 1 WHERE event_id = ?",
+                recentLastAttempt.getEventId());
+
+        assertTrue(claimService.claimNextEligibleForProcessing(3).isEmpty());
+
+        FailureEventEntity recoveredFromLastAttempt = failureEventRepository
+                .findById(lastAttemptFallback.getEventId()).orElseThrow();
+        assertEquals(ProcessingStatus.RETRYABLE, recoveredFromLastAttempt.getProcessingStatus());
+        assertEquals(1, recoveredFromLastAttempt.getAttemptCount());
+        assertEquals("WORKER_LEASE_EXPIRED", recoveredFromLastAttempt.getFailureCode());
+        assertNotNull(recoveredFromLastAttempt.getNextAttemptAt());
+
+        FailureEventEntity recoveredFromIngestedAt = failureEventRepository
+                .findById(ingestionFallback.getEventId()).orElseThrow();
+        assertEquals(ProcessingStatus.RETRYABLE, recoveredFromIngestedAt.getProcessingStatus());
+        assertEquals(1, recoveredFromIngestedAt.getAttemptCount());
+
+        FailureEventEntity stillProcessing = failureEventRepository
+                .findById(recentLastAttempt.getEventId()).orElseThrow();
+        assertEquals(ProcessingStatus.PROCESSING, stillProcessing.getProcessingStatus());
+        assertEquals(1, stillProcessing.getAttemptCount());
+    }
+
+    @Test
+    void shouldIncludeLeaseTimestampExactlyAtExpiryCutoff() {
+        Instant expiryCutoff = Instant.parse("2026-09-15T12:00:00Z");
+        FailureEventEntity exactlyExpired = persistProcessingEvent(
+                "processing-lease-exact-cutoff",
+                expiryCutoff);
+        FailureEventEntity notYetExpired = persistProcessingEvent(
+                "processing-lease-after-cutoff",
+                expiryCutoff.plusSeconds(1));
+
+        List<FailureEventEntity> selected = new TransactionTemplate(transactionManager)
+                .execute(status -> failureEventRepository.lockExpiredProcessingClaims(expiryCutoff, 10));
+
+        assertNotNull(selected);
+        assertEquals(List.of(exactlyExpired.getEventId()), selected.stream()
+                .map(FailureEventEntity::getEventId)
+                .toList());
+        assertEquals(ProcessingStatus.PROCESSING,
+                failureEventRepository.findById(notYetExpired.getEventId()).orElseThrow().getProcessingStatus());
+    }
+
+    @Test
+    void shouldSkipExpiredEventLockedByAnotherRecoveryInstance() throws Exception {
+        FailureEventEntity abandoned = persistProcessingEvent(
+                "locked-expired-processing-claim",
+                Instant.now().minusSeconds(3600));
+
+        CountDownLatch lockAcquired = new CountDownLatch(1);
+        CountDownLatch releaseLock = new CountDownLatch(1);
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try {
+            Future<?> lockHolder = executor.submit(() -> holdRowLock(
+                    abandoned.getEventId(),
+                    lockAcquired,
+                    releaseLock));
+            assertTrue(lockAcquired.await(5, TimeUnit.SECONDS));
+
+            List<ClaimedFailureEvent> claims = executor.submit(
+                    () -> claimService.claimNextEligibleForProcessing(1))
+                    .get(5, TimeUnit.SECONDS);
+
+            assertTrue(claims.isEmpty());
+            FailureEventEntity stillLocked = failureEventRepository.findById(abandoned.getEventId()).orElseThrow();
+            assertEquals(ProcessingStatus.PROCESSING, stillLocked.getProcessingStatus());
+
+            releaseLock.countDown();
+            lockHolder.get(5, TimeUnit.SECONDS);
+        } finally {
+            releaseLock.countDown();
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
     void shouldRecordOnlyOneFailureForDuplicateCallsUsingTheSameClaim() {
         FailureEventEntity event = persistEvent(
                 "duplicate-retry-record",

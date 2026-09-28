@@ -386,16 +386,24 @@ Normalized-event persistence failures use stable failure code `NORMALIZED_WRITE_
 
 ## 14. Crash and lease recovery
 
-An event is abandoned when:
+An event is abandoned when it is still `PROCESSING` and its lease timestamp is at or before the expiry cutoff (the boundary is inclusive):
 
 ```text
 processing_status = PROCESSING
-AND processing_started_at < now() - processing_lease_timeout
+AND lease_timestamp <= now - processing_lease_timeout
 ```
 
-Recovery transitions it to `RETRYABLE`, schedules the next attempt, clears `processing_started_at`, and records `WORKER_LEASE_EXPIRED`. If the already-incremented attempt count has reached the maximum, recovery transitions it to `FAILED`.
+`lease_timestamp` is selected in this order: `processing_started_at`, then `last_attempt_at`, then `ingested_at`. A fallback timestamp must also be at or before the expiry cutoff. A row with no reliable timestamp is inconsistent and must be surfaced for investigation, not immediately recovered. In the current schema `ingested_at` is non-null, so the final fallback is normally available.
 
-The lease timeout must be longer than the expected maximum time for one parse-and-normalize attempt. Recovery must be idempotent and safe to run on every application instance using row locking.
+The timeout and scan interval have different meanings: the timeout determines when a claim is expired; the scan interval determines how often recovery looks for expired claims. Recovery must have an independent scheduling opportunity so a processing batch waiting on a task cannot prevent recovery from running. Reuse the worker batch size for recovery unless measurements show a separate size is necessary.
+
+Claim timestamps and expiry cutoffs use PostgreSQL's transaction timestamp as the shared time authority across application instances. The expiry predicate is inclusive (`<=`). The existing retry policy remains responsible for calculating `next_attempt_at` after recovery.
+
+Recovery does not increment `attempt_count`: the claim already incremented it. If the count is below the configured maximum, recovery changes `PROCESSING` to `RETRYABLE`, applies the existing retry backoff, clears `processing_started_at`, and records `WORKER_LEASE_EXPIRED`. If the count has reached the maximum, recovery changes `PROCESSING` to `FAILED` and clears retry and lease timestamps.
+
+The recovery transaction is short: lock a bounded set of candidates with `FOR UPDATE SKIP LOCKED`, apply the transitions, and commit. It does not parse or normalize. A crash before commit leaves the rows available for a later scan. Optimistic `@Version` and the claim attempt check prevent a late worker from overwriting recovery or a newer attempt.
+
+The lease timeout must exceed the expected maximum processing duration, including time a claimed event may wait in the bounded executor queue. Recovery must be idempotent and safe to run on every application instance using row locking.
 
 ## 15. Database changes
 

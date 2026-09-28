@@ -44,7 +44,7 @@ public class FailureEventClaimService {
             throw new IllegalArgumentException("batchSize must be greater than zero");
         }
 
-        Instant claimedAt = Instant.now();
+        Instant claimedAt = failureEventRepository.currentDatabaseTime();
         int maxAttempts = retryPolicy.getMaxAttempts();
         recoverExpiredClaims(claimedAt, batchSize, maxAttempts);
 

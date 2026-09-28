@@ -44,6 +44,11 @@ public interface FailureEventRepository extends JpaRepository<FailureEventEntity
                         @Param("processingStatus") ProcessingStatus processingStatus);
 
         @Query(value = """
+                        SELECT CURRENT_TIMESTAMP
+                        """, nativeQuery = true)
+        Instant currentDatabaseTime();
+
+        @Query(value = """
                         SELECT fe.*
                         FROM failure_event fe
                         WHERE fe.processing_status = 'RECEIVED'
@@ -67,11 +72,16 @@ public interface FailureEventRepository extends JpaRepository<FailureEventEntity
                         SELECT fe.*
                         FROM failure_event fe
                         WHERE fe.processing_status = 'PROCESSING'
-                          AND (
-                                fe.processing_started_at IS NULL
-                                OR fe.processing_started_at <= :expiredBefore
-                              )
-                        ORDER BY fe.processing_started_at ASC NULLS FIRST, fe.event_id ASC
+                          AND COALESCE(
+                                fe.processing_started_at,
+                                fe.last_attempt_at,
+                                fe.ingested_at
+                              ) <= :expiredBefore
+                        ORDER BY COALESCE(
+                                fe.processing_started_at,
+                                fe.last_attempt_at,
+                                fe.ingested_at
+                              ) ASC, fe.event_id ASC
                         LIMIT :batchSize
                         FOR UPDATE SKIP LOCKED
                         """, nativeQuery = true)
