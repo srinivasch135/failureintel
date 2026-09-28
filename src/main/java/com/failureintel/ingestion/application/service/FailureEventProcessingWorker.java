@@ -42,8 +42,17 @@ public class FailureEventProcessingWorker {
 
     @Scheduled(fixedDelayString = "${failure-event.processing.worker.fixed-delay}")
     public void processNextBatch() {
-        List<ClaimedFailureEvent> claims = claimService
-                .claimNextEligibleForProcessing(workerProperties.batchSize());
+        List<ClaimedFailureEvent> claims;
+        try {
+            claims = claimService.claimNextEligibleForProcessing(workerProperties.batchSize());
+        } catch (RuntimeException claimFailure) {
+            LOGGER.error(
+                    "Failure-event worker could not claim a batch: batchSize={}",
+                    workerProperties.batchSize(),
+                    claimFailure);
+            return;
+        }
+
         if (claims.isEmpty()) {
             return;
         }

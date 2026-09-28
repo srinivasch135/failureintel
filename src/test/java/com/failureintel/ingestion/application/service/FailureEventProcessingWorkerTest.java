@@ -195,6 +195,39 @@ class FailureEventProcessingWorkerTest {
     }
 
     @Test
+    void shouldEndClaimFailureCycleWithoutSubmittingWorkAndAllowANextAttempt() {
+        executionContextRunner
+                .withPropertyValues(
+                        "failure-event.processing.worker.enabled=true",
+                        "failure-event.processing.worker.fixed-delay=1h",
+                        "failure-event.processing.worker.batch-size=4")
+                .run(context -> {
+                    FailureEventProcessingWorker worker = context.getBean(FailureEventProcessingWorker.class);
+                    FailureEventClaimService claimService = context.getBean(FailureEventClaimService.class);
+                    FailureEventProcessingService processingService = context.getBean(
+                            FailureEventProcessingService.class);
+                    ThreadPoolTaskExecutor executor = context.getBean(
+                            "failureEventNormalizationExecutor",
+                            ThreadPoolTaskExecutor.class);
+                    when(claimService.claimNextEligibleForProcessing(4))
+                            .thenThrow(new IllegalStateException("simulated claim failure"))
+                            .thenReturn(List.of());
+
+                    worker.processNextBatch();
+
+                    verify(claimService, times(1)).claimNextEligibleForProcessing(4);
+                    verifyNoInteractions(processingService);
+                    assertEquals(0, executor.getThreadPoolExecutor().getTaskCount());
+
+                    worker.processNextBatch();
+
+                    verify(claimService, times(2)).claimNextEligibleForProcessing(4);
+                    verifyNoInteractions(processingService);
+                    assertEquals(0, executor.getThreadPoolExecutor().getTaskCount());
+                });
+    }
+
+    @Test
     void shouldSubmitTheWholeBatchAndAwaitEveryAttemptWhenOneFails() throws Exception {
         List<ClaimedFailureEvent> claims = List.of(
                 new ClaimedFailureEvent(UUID.randomUUID(), 1),
