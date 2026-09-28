@@ -29,6 +29,7 @@ class FailureEventWorkerPropertiesTest {
                         "failure-event.processing.worker.fixed-delay=1500ms",
                         "failure-event.processing.worker.batch-size=12",
                         "failure-event.processing.worker.concurrency=3",
+                        "failure-event.processing.worker.processing-lease-timeout=6m",
                         "failure-event.processing.worker.shutdown-await=0s")
                 .run(context -> {
                     assertTrue(context.isRunning());
@@ -37,6 +38,7 @@ class FailureEventWorkerPropertiesTest {
                     assertEquals(Duration.ofMillis(1500), properties.fixedDelay());
                     assertEquals(12, properties.batchSize());
                     assertEquals(3, properties.concurrency());
+                    assertEquals(Duration.ofMinutes(6), properties.processingLeaseTimeout());
                     assertEquals(Duration.ZERO, properties.shutdownAwait());
                 });
     }
@@ -50,6 +52,7 @@ class FailureEventWorkerPropertiesTest {
             assertEquals(Duration.ofSeconds(2), properties.fixedDelay());
             assertEquals(8, properties.batchSize());
             assertEquals(2, properties.concurrency());
+            assertEquals(Duration.ofMinutes(5), properties.processingLeaseTimeout());
             assertEquals(Duration.ofSeconds(30), properties.shutdownAwait());
         });
     }
@@ -62,6 +65,8 @@ class FailureEventWorkerPropertiesTest {
             "failure-event.processing.worker.batch-size=-1",
             "failure-event.processing.worker.concurrency=0",
             "failure-event.processing.worker.concurrency=-1",
+            "failure-event.processing.worker.processing-lease-timeout=0s",
+            "failure-event.processing.worker.processing-lease-timeout=-1s",
             "failure-event.processing.worker.shutdown-await=-1s"
     })
     void shouldRejectInvalidWorkerSettings(String property) {

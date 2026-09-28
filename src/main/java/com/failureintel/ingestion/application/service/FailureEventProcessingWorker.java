@@ -14,6 +14,7 @@ import java.util.List;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.RejectedExecutionException;
 
 @Component
 @ConditionalOnProperty(
@@ -58,10 +59,24 @@ public class FailureEventProcessingWorker {
         }
 
         List<CompletableFuture<Void>> processingTasks = new ArrayList<>(claims.size());
+        List<ClaimedFailureEvent> submittedClaims = new ArrayList<>(claims.size());
         for (ClaimedFailureEvent claim : claims) {
-            processingTasks.add(CompletableFuture.runAsync(
-                    () -> processingService.process(claim),
-                    normalizationExecutor));
+            try {
+                processingTasks.add(CompletableFuture.runAsync(
+                        () -> processingService.process(claim),
+                        normalizationExecutor));
+                submittedClaims.add(claim);
+            } catch (RejectedExecutionException executorClosing) {
+                LOGGER.warn(
+                        "Failure-event worker stopped submitting its claimed batch because the executor is closing; "
+                                + "unsubmitted claims will be recovered after their processing lease expires: "
+                                + "eventId={}, attempt={}, unsubmittedCount={}",
+                        claim.eventId(),
+                        claim.attemptNumber(),
+                        claims.size() - submittedClaims.size(),
+                        executorClosing);
+                break;
+            }
         }
 
         CompletableFuture.allOf(processingTasks.toArray(CompletableFuture<?>[]::new))
@@ -74,8 +89,8 @@ public class FailureEventProcessingWorker {
             } catch (CompletionException | CancellationException processingFailure) {
                 LOGGER.error(
                         "Failure-event worker could not complete claim: eventId={}, attempt={}",
-                        claims.get(i).eventId(),
-                        claims.get(i).attemptNumber(),
+                        submittedClaims.get(i).eventId(),
+                        submittedClaims.get(i).attemptNumber(),
                         processingFailure);
             }
         }

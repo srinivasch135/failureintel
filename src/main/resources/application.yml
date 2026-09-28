@@ -65,6 +65,7 @@ failure-event:
       batch-size: ${FAILURE_EVENT_WORKER_BATCH_SIZE:8}
       concurrency: ${FAILURE_EVENT_WORKER_CONCURRENCY:2}
       shutdown-await: ${FAILURE_EVENT_WORKER_SHUTDOWN_AWAIT:30s}
+      processing-lease-timeout: ${FAILURE_EVENT_PROCESSING_LEASE_TIMEOUT:5m}
     retry:
       max-attempts: ${FAILURE_EVENT_RETRY_MAX_ATTEMPTS:5}
       delays: ${FAILURE_EVENT_RETRY_DELAYS:PT1M,PT5M,PT30M,PT2H}

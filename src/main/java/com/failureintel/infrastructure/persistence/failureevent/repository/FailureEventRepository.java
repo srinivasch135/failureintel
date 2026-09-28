@@ -63,6 +63,22 @@ public interface FailureEventRepository extends JpaRepository<FailureEventEntity
                         @Param("batchSize") int batchSize,
                         @Param("maxAttempts") int maxAttempts);
 
+        @Query(value = """
+                        SELECT fe.*
+                        FROM failure_event fe
+                        WHERE fe.processing_status = 'PROCESSING'
+                          AND (
+                                fe.processing_started_at IS NULL
+                                OR fe.processing_started_at <= :expiredBefore
+                              )
+                        ORDER BY fe.processing_started_at ASC NULLS FIRST, fe.event_id ASC
+                        LIMIT :batchSize
+                        FOR UPDATE SKIP LOCKED
+                        """, nativeQuery = true)
+        List<FailureEventEntity> lockExpiredProcessingClaims(
+                        @Param("expiredBefore") Instant expiredBefore,
+                        @Param("batchSize") int batchSize);
+
         Page<FailureEventEntity> findByOccurredAtBetween(
                         Instant start,
                         Instant end,

@@ -93,8 +93,9 @@ class FailureEventClaimServiceIntegrationTest {
                 Instant.parse("2026-09-15T10:01:00Z"), ELIGIBLE_RETRY_AT);
         FailureEventEntity futureRetryable = persistRetryableEvent("future-retryable",
                 Instant.parse("2026-09-15T10:02:00Z"), Instant.parse("2999-01-01T00:00:00Z"));
-        FailureEventEntity processing = persistEvent("processing", ProcessingStatus.PROCESSING,
-                Instant.parse("2026-09-15T10:03:00Z"));
+        FailureEventEntity processing = persistProcessingEvent(
+                "processing",
+                Instant.now());
         FailureEventEntity normalized = persistEvent("normalized", ProcessingStatus.NORMALIZED,
                 Instant.parse("2026-09-15T10:04:00Z"));
         FailureEventEntity failed = persistEvent("failed", ProcessingStatus.FAILED,
@@ -282,6 +283,54 @@ class FailureEventClaimServiceIntegrationTest {
     }
 
     @Test
+    void shouldRecoverExpiredProcessingClaimAndAllowItToBeClaimedAgainAfterBackoff() {
+        FailureEventEntity abandoned = persistProcessingEvent(
+                "abandoned-processing-claim",
+                Instant.now().minusSeconds(3600));
+
+        assertTrue(claimService.claimNextEligibleForProcessing(1).isEmpty(),
+                "An abandoned attempt should respect the normal retry backoff");
+
+        FailureEventEntity recovered = failureEventRepository.findById(abandoned.getEventId()).orElseThrow();
+        assertEquals(ProcessingStatus.RETRYABLE, recovered.getProcessingStatus());
+        assertEquals(1, recovered.getAttemptCount());
+        assertEquals("WORKER_LEASE_EXPIRED", recovered.getFailureCode());
+        assertNotNull(recovered.getNextAttemptAt());
+        assertNull(recovered.getProcessingStartedAt());
+
+        jdbcTemplate.update(
+                "UPDATE failure_event SET next_attempt_at = ?, version = version + 1 WHERE event_id = ?",
+                Timestamp.from(Instant.now().minusSeconds(1)),
+                abandoned.getEventId());
+        List<ClaimedFailureEvent> retryClaims = claimService.claimNextEligibleForProcessing(1);
+
+        assertEquals(1, retryClaims.size());
+        assertEquals(abandoned.getEventId(), retryClaims.get(0).eventId());
+        assertEquals(2, retryClaims.get(0).attemptNumber());
+    }
+
+    @Test
+    void shouldFailAnExpiredProcessingClaimWhenItsAttemptLimitIsReached() {
+        FailureEventEntity abandoned = persistProcessingEvent(
+                "abandoned-attempt-limit",
+                Instant.now().minusSeconds(3600));
+        int maxAttempts = retryPolicy.getMaxAttempts();
+        jdbcTemplate.update(
+                "UPDATE failure_event SET attempt_count = ?, version = version + 1 WHERE event_id = ?",
+                maxAttempts,
+                abandoned.getEventId());
+
+        assertTrue(claimService.claimNextEligibleForProcessing(1).isEmpty());
+
+        FailureEventEntity recovered = failureEventRepository.findById(abandoned.getEventId()).orElseThrow();
+        assertEquals(ProcessingStatus.FAILED, recovered.getProcessingStatus());
+        assertEquals(maxAttempts, recovered.getAttemptCount());
+        assertEquals("RETRY_EXHAUSTED", recovered.getFailureCode());
+        assertNull(recovered.getProcessingStartedAt());
+        assertNull(recovered.getNextAttemptAt());
+    }
+
+    @Test
     void shouldRecordOnlyOneFailureForDuplicateCallsUsingTheSameClaim() {
         FailureEventEntity event = persistEvent(
                 "duplicate-retry-record",
@@ -409,6 +458,15 @@ class FailureEventClaimServiceIntegrationTest {
         event.setTraceId(traceId);
         event.setRawPayload("{}");
         event.setProcessingStatus(status);
+        return failureEventRepository.saveAndFlush(event);
+    }
+
+    private FailureEventEntity persistProcessingEvent(String traceId, Instant attemptStartedAt) {
+        FailureEventEntity event = persistEvent(
+                traceId,
+                ProcessingStatus.RECEIVED,
+                attemptStartedAt);
+        event.claimForProcessing(attemptStartedAt);
         return failureEventRepository.saveAndFlush(event);
     }
 

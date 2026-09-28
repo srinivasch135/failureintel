@@ -10,12 +10,15 @@ import org.junit.jupiter.api.Test;
 import org.springframework.boot.WebApplicationType;
 import org.springframework.boot.builder.SpringApplicationBuilder;
 import org.springframework.context.ConfigurableApplicationContext;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.utility.DockerImageName;
 
+import java.sql.Timestamp;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.UUID;
 
 import static com.failureintel.test.support.FailureEventTestFixtures.validRequest;
@@ -33,16 +36,34 @@ class FailureEventProcessingWorkerRestartIntegrationTest {
             .withPassword("testpassword");
 
     @Test
-    void shouldProcessPersistedReceivedEventAfterApplicationContextRestart() {
-        UUID eventId;
+    void shouldResumeReceivedAndAbandonedProcessingEventsAfterApplicationContextRestart() {
+        UUID abandonedClaimId;
+        UUID receivedEventId;
         try (ConfigurableApplicationContext initialContext = startApplicationContext(false)) {
             FailureEventIngestionService ingestionService = initialContext.getBean(
                     FailureEventIngestionService.class);
-            eventId = UUID.fromString(ingestionService.ingestFailureEvent(
-                    validRequest("worker-restart-" + UUID.randomUUID())));
+            abandonedClaimId = UUID.fromString(ingestionService.ingestFailureEvent(
+                    validRequest("worker-restart-claimed-" + UUID.randomUUID())));
+
+            ClaimedFailureEvent claim = initialContext.getBean(FailureEventClaimService.class)
+                    .claimNextEligibleForProcessing(1)
+                    .get(0);
+            assertEquals(abandonedClaimId, claim.eventId());
+            assertEquals(ProcessingStatus.PROCESSING,
+                    initialContext.getBean(FailureEventRepository.class)
+                            .findById(abandonedClaimId).orElseThrow().getProcessingStatus());
+
+            initialContext.getBean(JdbcTemplate.class).update(
+                    "UPDATE failure_event SET processing_started_at = ?, version = version + 1 "
+                            + "WHERE event_id = ?",
+                    Timestamp.from(Instant.now().minusSeconds(3600)),
+                    abandonedClaimId);
+
+            receivedEventId = UUID.fromString(ingestionService.ingestFailureEvent(
+                    validRequest("worker-restart-received-" + UUID.randomUUID())));
 
             FailureEventEntity persisted = initialContext.getBean(FailureEventRepository.class)
-                    .findById(eventId)
+                    .findById(receivedEventId)
                     .orElseThrow();
             assertEquals(ProcessingStatus.RECEIVED, persisted.getProcessingStatus());
         }
@@ -52,15 +73,22 @@ class FailureEventProcessingWorkerRestartIntegrationTest {
             NormalizedFailureEventRepository normalizedRepository = restartedContext.getBean(
                     NormalizedFailureEventRepository.class);
 
-            assertTrue(failureEventRepository.existsById(eventId),
+            assertTrue(failureEventRepository.existsById(abandonedClaimId),
                     "The raw event should remain stored when the first application context closes");
+            assertTrue(failureEventRepository.existsById(receivedEventId),
+                    "The received event should remain stored when the first application context closes");
 
             Awaitility.await()
                     .atMost(Duration.ofSeconds(10))
                     .untilAsserted(() -> {
-                        assertEquals(ProcessingStatus.NORMALIZED,
-                                failureEventRepository.findById(eventId).orElseThrow().getProcessingStatus());
-                        assertTrue(normalizedRepository.existsById(eventId));
+                        assertEquals(ProcessingStatus.NORMALIZED, failureEventRepository.findById(abandonedClaimId)
+                                .orElseThrow().getProcessingStatus());
+                        assertEquals(ProcessingStatus.NORMALIZED, failureEventRepository.findById(receivedEventId)
+                                .orElseThrow().getProcessingStatus());
+                        assertTrue(normalizedRepository.existsById(abandonedClaimId));
+                        assertTrue(normalizedRepository.existsById(receivedEventId));
+                        assertEquals(2, failureEventRepository.findById(abandonedClaimId)
+                                .orElseThrow().getAttemptCount());
                     });
         }
     }
@@ -75,8 +103,9 @@ class FailureEventProcessingWorkerRestartIntegrationTest {
                         "--spring.datasource.password=" + postgres.getPassword(),
                         "--spring.jpa.hibernate.ddl-auto=validate",
                         "--failure-event.processing.worker.enabled=" + workerEnabled,
-                        "--failure-event.processing.worker.fixed-delay=1h",
+                        "--failure-event.processing.worker.fixed-delay=100ms",
                         "--failure-event.processing.worker.shutdown-await=5s",
+                        "--failure-event.processing.retry.delays=PT0.01S",
                         "--spring.main.banner-mode=off");
     }
 }

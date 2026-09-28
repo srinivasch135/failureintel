@@ -22,10 +22,8 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
-import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -33,7 +31,6 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -205,7 +202,7 @@ class FailureEventProcessingWorkerTest {
     }
 
     @Test
-    void shouldRejectSubmissionsWhenShutdownBeginsDuringClaiming() throws InterruptedException {
+    void shouldContainSubmissionRejectionWhenShutdownBeginsDuringClaiming() throws InterruptedException {
         ClaimedFailureEvent firstClaim = new ClaimedFailureEvent(UUID.randomUUID(), 1);
         ClaimedFailureEvent secondClaim = new ClaimedFailureEvent(UUID.randomUUID(), 1);
         CountDownLatch claimStarted = new CountDownLatch(1);
@@ -243,10 +240,7 @@ class FailureEventProcessingWorkerTest {
                                 "The normalization executor should reject work after its shutdown begins");
 
                         allowClaimToReturn.countDown();
-                        ExecutionException rejection = assertThrows(
-                                ExecutionException.class,
-                                () -> cycle.get(2, TimeUnit.SECONDS));
-                        assertInstanceOf(RejectedExecutionException.class, rejection.getCause());
+                        cycle.get(2, TimeUnit.SECONDS);
                         verifyNoInteractions(processingService);
                         assertEquals(0, normalizationExecutor.getThreadPoolExecutor().getTaskCount());
                     });
