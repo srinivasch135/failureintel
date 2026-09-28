@@ -22,14 +22,19 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
@@ -170,6 +175,88 @@ class FailureEventProcessingWorkerTest {
     }
 
     @Test
+    void shouldCancelFutureScheduledCyclesWhenApplicationContextCloses() throws InterruptedException {
+        CountDownLatch claimAttempted = new CountDownLatch(1);
+
+        contextRunner
+                .withPropertyValues(
+                        "failure-event.processing.worker.enabled=true",
+                        "failure-event.processing.worker.fixed-delay=1h")
+                .run(context -> {
+                    FailureEventClaimService claimService = context.getBean(FailureEventClaimService.class);
+                    doAnswer(invocation -> {
+                        claimAttempted.countDown();
+                        return List.of();
+                    }).when(claimService).claimNextEligibleForProcessing(anyInt());
+
+                    assertTrue(claimAttempted.await(2, TimeUnit.SECONDS),
+                            "The scheduled worker should run while the application context is active");
+
+                    ScheduledAnnotationBeanPostProcessor scheduledTasks = context.getBean(
+                            ScheduledAnnotationBeanPostProcessor.class);
+                    assertEquals(1, scheduledTasks.getScheduledTasks().size());
+
+                    context.close();
+
+                    assertTrue(scheduledTasks.getScheduledTasks().isEmpty(),
+                            "Spring should cancel scheduled worker cycles during context shutdown");
+                    verify(claimService, times(1)).claimNextEligibleForProcessing(anyInt());
+                });
+    }
+
+    @Test
+    void shouldRejectSubmissionsWhenShutdownBeginsDuringClaiming() throws InterruptedException {
+        ClaimedFailureEvent firstClaim = new ClaimedFailureEvent(UUID.randomUUID(), 1);
+        ClaimedFailureEvent secondClaim = new ClaimedFailureEvent(UUID.randomUUID(), 1);
+        CountDownLatch claimStarted = new CountDownLatch(1);
+        CountDownLatch allowClaimToReturn = new CountDownLatch(1);
+        ExecutorService claimCycle = Executors.newSingleThreadExecutor();
+
+        try {
+            executionContextRunner
+                    .withPropertyValues(
+                            "failure-event.processing.worker.enabled=true",
+                            "failure-event.processing.worker.fixed-delay=1h",
+                            "failure-event.processing.worker.batch-size=2")
+                    .run(context -> {
+                        FailureEventProcessingWorker worker = context.getBean(
+                                FailureEventProcessingWorker.class);
+                        FailureEventClaimService claimService = context.getBean(
+                                FailureEventClaimService.class);
+                        FailureEventProcessingService processingService = context.getBean(
+                                FailureEventProcessingService.class);
+                        ThreadPoolTaskExecutor normalizationExecutor = context.getBean(
+                                "failureEventNormalizationExecutor",
+                                ThreadPoolTaskExecutor.class);
+                        when(claimService.claimNextEligibleForProcessing(2)).thenAnswer(invocation -> {
+                            claimStarted.countDown();
+                            awaitLatch(allowClaimToReturn);
+                            return List.of(firstClaim, secondClaim);
+                        });
+
+                        Future<?> cycle = claimCycle.submit(worker::processNextBatch);
+                        assertTrue(claimStarted.await(2, TimeUnit.SECONDS),
+                                "The worker should be inside the claim operation before shutdown");
+
+                        context.close();
+                        assertTrue(normalizationExecutor.getThreadPoolExecutor().isShutdown(),
+                                "The normalization executor should reject work after its shutdown begins");
+
+                        allowClaimToReturn.countDown();
+                        ExecutionException rejection = assertThrows(
+                                ExecutionException.class,
+                                () -> cycle.get(2, TimeUnit.SECONDS));
+                        assertInstanceOf(RejectedExecutionException.class, rejection.getCause());
+                        verifyNoInteractions(processingService);
+                        assertEquals(0, normalizationExecutor.getThreadPoolExecutor().getTaskCount());
+                    });
+        } finally {
+            allowClaimToReturn.countDown();
+            claimCycle.shutdownNow();
+        }
+    }
+
+    @Test
     void shouldReturnQuietlyWhenNoClaimsAreAvailable() throws NoSuchMethodException {
         executionContextRunner
                 .withPropertyValues(
@@ -300,6 +387,77 @@ class FailureEventProcessingWorkerTest {
                         scheduledThread.shutdownNow();
                     }
                 });
+    }
+
+    @Test
+    void shouldNotExceedConfiguredProcessingConcurrency() throws Exception {
+        List<ClaimedFailureEvent> claims = List.of(
+                new ClaimedFailureEvent(UUID.randomUUID(), 1),
+                new ClaimedFailureEvent(UUID.randomUUID(), 1),
+                new ClaimedFailureEvent(UUID.randomUUID(), 1),
+                new ClaimedFailureEvent(UUID.randomUUID(), 1),
+                new ClaimedFailureEvent(UUID.randomUUID(), 1));
+        CountDownLatch firstTasksStarted = new CountDownLatch(2);
+        CountDownLatch allowTasksToFinish = new CountDownLatch(1);
+        CountDownLatch allTasksFinished = new CountDownLatch(claims.size());
+        AtomicInteger activeTasks = new AtomicInteger();
+        AtomicInteger maximumActiveTasks = new AtomicInteger();
+
+        executionContextRunner
+                .withPropertyValues(
+                        "failure-event.processing.worker.enabled=true",
+                        "failure-event.processing.worker.fixed-delay=1h",
+                        "failure-event.processing.worker.batch-size=5",
+                        "failure-event.processing.worker.concurrency=2")
+                .run(context -> {
+                    FailureEventProcessingWorker worker = context.getBean(FailureEventProcessingWorker.class);
+                    FailureEventClaimService claimService = context.getBean(FailureEventClaimService.class);
+                    FailureEventProcessingService processingService = context.getBean(
+                            FailureEventProcessingService.class);
+                    when(claimService.claimNextEligibleForProcessing(5)).thenReturn(claims);
+                    doAnswer(invocation -> {
+                        int active = activeTasks.incrementAndGet();
+                        maximumActiveTasks.accumulateAndGet(active, Math::max);
+                        firstTasksStarted.countDown();
+                        try {
+                            awaitLatch(allowTasksToFinish);
+                            return null;
+                        } finally {
+                            activeTasks.decrementAndGet();
+                            allTasksFinished.countDown();
+                        }
+                    }).when(processingService).process(any(ClaimedFailureEvent.class));
+
+                    ExecutorService workerCycle = Executors.newSingleThreadExecutor();
+                    try {
+                        Future<?> cycle = workerCycle.submit(worker::processNextBatch);
+
+                        assertTrue(firstTasksStarted.await(2, TimeUnit.SECONDS),
+                                "The configured worker concurrency should be able to run two tasks");
+                        assertEquals(2, activeTasks.get());
+                        assertEquals(2, maximumActiveTasks.get());
+
+                        allowTasksToFinish.countDown();
+                        assertTrue(allTasksFinished.await(2, TimeUnit.SECONDS));
+                        cycle.get(2, TimeUnit.SECONDS);
+
+                        assertEquals(2, maximumActiveTasks.get());
+                        verify(processingService, times(claims.size()))
+                                .process(any(ClaimedFailureEvent.class));
+                    } finally {
+                        allowTasksToFinish.countDown();
+                        workerCycle.shutdownNow();
+                    }
+                });
+    }
+
+    @Test
+    void shouldScheduleWorkerCyclesUsingConfiguredFixedDelay() throws NoSuchMethodException {
+        org.springframework.scheduling.annotation.Scheduled scheduled = FailureEventProcessingWorker.class
+                .getMethod("processNextBatch")
+                .getAnnotation(org.springframework.scheduling.annotation.Scheduled.class);
+
+        assertEquals("${failure-event.processing.worker.fixed-delay}", scheduled.fixedDelayString());
     }
 
     private static void awaitLatch(CountDownLatch latch) {
