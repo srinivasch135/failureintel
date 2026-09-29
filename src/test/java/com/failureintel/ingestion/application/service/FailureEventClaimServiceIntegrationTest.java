@@ -398,31 +398,80 @@ class FailureEventClaimServiceIntegrationTest {
     }
 
     @Test
-    void shouldSkipExpiredEventLockedByAnotherRecoveryInstance() throws Exception {
-        FailureEventEntity abandoned = persistProcessingEvent(
+    void shouldSelectOnlyExpiredProcessingRowsWithinTheRequestedBatch() {
+        Instant cutoff = Instant.parse("2026-09-15T12:00:00Z");
+        FailureEventEntity oldestExpired = persistProcessingEvent(
+                "expired-processing-oldest",
+                cutoff.minusSeconds(2));
+        FailureEventEntity boundaryExpired = persistProcessingEvent(
+                "expired-processing-boundary",
+                cutoff);
+        FailureEventEntity unexpired = persistProcessingEvent(
+                "unexpired-processing",
+                cutoff.plusSeconds(1));
+        FailureEventEntity otherStatus = persistEvent(
+                "expired-received",
+                ProcessingStatus.RECEIVED,
+                cutoff.minusSeconds(10));
+
+        List<FailureEventEntity> selected = new TransactionTemplate(transactionManager)
+                .execute(status -> failureEventRepository.lockExpiredProcessingClaims(cutoff, 2));
+
+        assertNotNull(selected);
+        assertEquals(List.of(oldestExpired.getEventId(), boundaryExpired.getEventId()), selected.stream()
+                .map(FailureEventEntity::getEventId)
+                .toList());
+        assertEquals(1, selected.get(0).getAttemptCount());
+        assertEquals(1, selected.get(1).getAttemptCount());
+        assertEquals(ProcessingStatus.PROCESSING,
+                failureEventRepository.findById(unexpired.getEventId()).orElseThrow().getProcessingStatus());
+        assertEquals(ProcessingStatus.RECEIVED,
+                failureEventRepository.findById(otherStatus.getEventId()).orElseThrow().getProcessingStatus());
+    }
+
+    @Test
+    void shouldSkipAnExpiredRowLockedByAnotherSelectionAndSelectAnotherRow() throws Exception {
+        FailureEventEntity firstExpired = persistProcessingEvent(
                 "locked-expired-processing-claim",
-                Instant.now().minusSeconds(3600));
+                Instant.parse("2026-09-15T11:00:00Z"));
+        FailureEventEntity secondExpired = persistProcessingEvent(
+                "available-expired-processing-claim",
+                Instant.parse("2026-09-15T11:01:00Z"));
 
         CountDownLatch lockAcquired = new CountDownLatch(1);
         CountDownLatch releaseLock = new CountDownLatch(1);
         ExecutorService executor = Executors.newFixedThreadPool(2);
         try {
-            Future<?> lockHolder = executor.submit(() -> holdRowLock(
-                    abandoned.getEventId(),
-                    lockAcquired,
-                    releaseLock));
+            Future<List<UUID>> firstSelection = executor.submit(() -> {
+                return new TransactionTemplate(transactionManager).execute(status -> {
+                    List<UUID> selected = failureEventRepository
+                            .lockExpiredProcessingClaims(Instant.parse("2026-09-15T12:00:00Z"), 1)
+                            .stream()
+                            .map(FailureEventEntity::getEventId)
+                            .toList();
+                    lockAcquired.countDown();
+                    try {
+                        assertTrue(releaseLock.await(20, TimeUnit.SECONDS));
+                    } catch (InterruptedException exception) {
+                        Thread.currentThread().interrupt();
+                        throw new IllegalStateException("Interrupted while holding recovery selection lock", exception);
+                    }
+                    return selected;
+                });
+            });
             assertTrue(lockAcquired.await(5, TimeUnit.SECONDS));
 
-            List<ClaimedFailureEvent> claims = executor.submit(
-                    () -> claimService.claimNextEligibleForProcessing(1))
-                    .get(5, TimeUnit.SECONDS);
+            List<FailureEventEntity> secondSelection = executor.submit(() -> new TransactionTemplate(transactionManager)
+                    .execute(status -> failureEventRepository
+                            .lockExpiredProcessingClaims(Instant.parse("2026-09-15T12:00:00Z"), 1)))
+                    .get(3, TimeUnit.SECONDS);
 
-            assertTrue(claims.isEmpty());
-            FailureEventEntity stillLocked = failureEventRepository.findById(abandoned.getEventId()).orElseThrow();
-            assertEquals(ProcessingStatus.PROCESSING, stillLocked.getProcessingStatus());
+            assertEquals(List.of(secondExpired.getEventId()), secondSelection.stream()
+                    .map(FailureEventEntity::getEventId)
+                    .toList());
 
             releaseLock.countDown();
-            lockHolder.get(5, TimeUnit.SECONDS);
+            assertEquals(List.of(firstExpired.getEventId()), firstSelection.get(5, TimeUnit.SECONDS));
         } finally {
             releaseLock.countDown();
             executor.shutdownNow();
