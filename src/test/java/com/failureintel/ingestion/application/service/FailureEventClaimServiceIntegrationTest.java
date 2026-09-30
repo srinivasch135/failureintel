@@ -13,6 +13,7 @@ import org.springframework.boot.testcontainers.service.connection.ServiceConnect
 import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.TestPropertySource;
+import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 import org.testcontainers.containers.PostgreSQLContainer;
@@ -41,6 +42,10 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.doThrow;
 
 @SpringBootTest
 @Testcontainers
@@ -66,6 +71,9 @@ class FailureEventClaimServiceIntegrationTest {
     private FailureEventClaimService claimService;
 
     @Autowired
+    private FailureEventRecoveryService recoveryService;
+
+    @Autowired
     private FailureEventRetryStateRecorder retryStateRecorder;
 
     @Autowired
@@ -73,6 +81,12 @@ class FailureEventClaimServiceIntegrationTest {
 
     @Autowired
     private FailureEventRepository failureEventRepository;
+
+    @MockitoSpyBean
+    private FailureEventRepository failureEventRepositorySpy;
+
+    @MockitoSpyBean
+    private FailureEventRetryPolicy retryPolicySpy;
 
     @Autowired
     private JdbcTemplate jdbcTemplate;
@@ -288,6 +302,7 @@ class FailureEventClaimServiceIntegrationTest {
                 "abandoned-processing-claim",
                 Instant.now().minusSeconds(3600));
 
+        recoveryService.recoverExpiredClaims(1);
         assertTrue(claimService.claimNextEligibleForProcessing(1).isEmpty(),
                 "An abandoned attempt should respect the normal retry backoff");
 
@@ -320,6 +335,7 @@ class FailureEventClaimServiceIntegrationTest {
                 maxAttempts,
                 abandoned.getEventId());
 
+        recoveryService.recoverExpiredClaims(1);
         assertTrue(claimService.claimNextEligibleForProcessing(1).isEmpty());
 
         FailureEventEntity recovered = failureEventRepository.findById(abandoned.getEventId()).orElseThrow();
@@ -356,6 +372,7 @@ class FailureEventClaimServiceIntegrationTest {
                         + "version = version + 1 WHERE event_id = ?",
                 recentLastAttempt.getEventId());
 
+        recoveryService.recoverExpiredClaims(3);
         assertTrue(claimService.claimNextEligibleForProcessing(3).isEmpty());
 
         FailureEventEntity recoveredFromLastAttempt = failureEventRepository
@@ -476,6 +493,57 @@ class FailureEventClaimServiceIntegrationTest {
             releaseLock.countDown();
             executor.shutdownNow();
         }
+    }
+
+    @Test
+    void shouldKeepCommittedRecoveryWhenTheFollowingClaimTransactionFails() {
+        FailureEventEntity abandoned = persistProcessingEvent(
+                "recovery-commit-before-claim-failure",
+                Instant.now().minusSeconds(3600));
+        doThrow(new IllegalStateException("simulated claim selection failure"))
+                .when(failureEventRepositorySpy)
+                .lockNextEligibleForProcessing(any(Instant.class), anyInt(), anyInt());
+
+        recoveryService.recoverExpiredClaims(1);
+
+        new TransactionTemplate(transactionManager).executeWithoutResult(status -> jdbcTemplate.queryForObject(
+                "SELECT event_id FROM failure_event WHERE event_id = ? FOR UPDATE NOWAIT",
+                UUID.class,
+                abandoned.getEventId()));
+        assertThrows(
+                IllegalStateException.class,
+                () -> claimService.claimNextEligibleForProcessing(1));
+
+        FailureEventEntity recovered = failureEventRepository.findById(abandoned.getEventId()).orElseThrow();
+        assertEquals(ProcessingStatus.RETRYABLE, recovered.getProcessingStatus());
+        assertEquals(1, recovered.getAttemptCount());
+        assertEquals("WORKER_LEASE_EXPIRED", recovered.getFailureCode());
+        assertNotNull(recovered.getNextAttemptAt());
+    }
+
+    @Test
+    void shouldRollBackAllRecoveryTransitionsWhenRecoveryFailsBeforeCommit() {
+        FailureEventEntity firstExpired = persistProcessingEvent(
+                "recovery-rollback-first",
+                Instant.now().minusSeconds(3600));
+        FailureEventEntity secondExpired = persistProcessingEvent(
+                "recovery-rollback-second",
+                Instant.now().minusSeconds(3500));
+        doReturn(Optional.of(Instant.now().plusSeconds(60)))
+                .doThrow(new IllegalStateException("simulated recovery failure"))
+                .when(retryPolicySpy)
+                .nextAttemptAt(1);
+
+        assertThrows(IllegalStateException.class, () -> recoveryService.recoverExpiredClaims(2));
+
+        FailureEventEntity firstAfterRollback = failureEventRepository.findById(firstExpired.getEventId())
+                .orElseThrow();
+        FailureEventEntity secondAfterRollback = failureEventRepository.findById(secondExpired.getEventId())
+                .orElseThrow();
+        assertEquals(ProcessingStatus.PROCESSING, firstAfterRollback.getProcessingStatus());
+        assertEquals(ProcessingStatus.PROCESSING, secondAfterRollback.getProcessingStatus());
+        assertEquals(1, firstAfterRollback.getAttemptCount());
+        assertEquals(1, secondAfterRollback.getAttemptCount());
     }
 
     @Test

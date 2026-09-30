@@ -25,16 +25,19 @@ public class FailureEventProcessingWorker {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(FailureEventProcessingWorker.class);
 
+    private final FailureEventRecoveryService recoveryService;
     private final FailureEventClaimService claimService;
     private final FailureEventProcessingService processingService;
     private final FailureEventWorkerProperties workerProperties;
     private final ThreadPoolTaskExecutor normalizationExecutor;
 
     public FailureEventProcessingWorker(
+            FailureEventRecoveryService recoveryService,
             FailureEventClaimService claimService,
             FailureEventProcessingService processingService,
             FailureEventWorkerProperties workerProperties,
             @Qualifier("failureEventNormalizationExecutor") ThreadPoolTaskExecutor normalizationExecutor) {
+        this.recoveryService = recoveryService;
         this.claimService = claimService;
         this.processingService = processingService;
         this.workerProperties = workerProperties;
@@ -44,6 +47,16 @@ public class FailureEventProcessingWorker {
     @Scheduled(fixedDelayString = "${failure-event.processing.worker.fixed-delay}")
     public void processNextBatch() {
         List<ClaimedFailureEvent> claims;
+        try {
+            recoveryService.recoverExpiredClaims(workerProperties.batchSize());
+        } catch (RuntimeException recoveryFailure) {
+            LOGGER.error(
+                    "Failure-event worker could not recover expired claims: batchSize={}",
+                    workerProperties.batchSize(),
+                    recoveryFailure);
+            return;
+        }
+
         try {
             claims = claimService.claimNextEligibleForProcessing(workerProperties.batchSize());
         } catch (RuntimeException claimFailure) {

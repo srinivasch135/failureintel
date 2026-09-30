@@ -36,6 +36,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -259,13 +261,17 @@ class FailureEventProcessingWorkerTest {
                         "failure-event.processing.worker.batch-size=4")
                 .run(context -> {
                     FailureEventProcessingWorker worker = context.getBean(FailureEventProcessingWorker.class);
+                    FailureEventRecoveryService recoveryService = context.getBean(
+                            FailureEventRecoveryService.class);
                     FailureEventClaimService claimService = context.getBean(FailureEventClaimService.class);
                     FailureEventProcessingService processingService = context.getBean(
                             FailureEventProcessingService.class);
 
                     worker.processNextBatch();
 
-                    verify(claimService, times(1)).claimNextEligibleForProcessing(4);
+                    var calls = inOrder(recoveryService, claimService);
+                    calls.verify(recoveryService).recoverExpiredClaims(4);
+                    calls.verify(claimService).claimNextEligibleForProcessing(4);
                     verifyNoInteractions(processingService);
                     assertEquals(0, context.getBean(
                             "failureEventNormalizationExecutor",
@@ -305,6 +311,29 @@ class FailureEventProcessingWorkerTest {
                     verify(claimService, times(2)).claimNextEligibleForProcessing(4);
                     verifyNoInteractions(processingService);
                     assertEquals(0, executor.getThreadPoolExecutor().getTaskCount());
+                });
+    }
+
+    @Test
+    void shouldStopTheCycleWhenRecoveryFailsWithoutStartingTheClaimTransaction() {
+        executionContextRunner
+                .withPropertyValues(
+                        "failure-event.processing.worker.enabled=true",
+                        "failure-event.processing.worker.fixed-delay=1h",
+                        "failure-event.processing.worker.batch-size=4")
+                .run(context -> {
+                    FailureEventProcessingWorker worker = context.getBean(FailureEventProcessingWorker.class);
+                    FailureEventRecoveryService recoveryService = context.getBean(
+                            FailureEventRecoveryService.class);
+                    FailureEventClaimService claimService = context.getBean(FailureEventClaimService.class);
+                    doThrow(new IllegalStateException("simulated recovery failure"))
+                            .when(recoveryService)
+                            .recoverExpiredClaims(4);
+
+                    worker.processNextBatch();
+
+                    verify(recoveryService, times(1)).recoverExpiredClaims(4);
+                    verifyNoInteractions(claimService);
                 });
     }
 
@@ -488,6 +517,11 @@ class FailureEventProcessingWorkerTest {
 
     @Configuration(proxyBeanMethods = false)
     static class WorkerMocksConfiguration {
+        @Bean
+        FailureEventRecoveryService failureEventRecoveryService() {
+            return mock(FailureEventRecoveryService.class);
+        }
+
         @Bean
         FailureEventClaimService failureEventClaimService() {
             FailureEventClaimService claimService = mock(FailureEventClaimService.class);
