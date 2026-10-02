@@ -10,6 +10,7 @@ import java.util.Objects;
 public record FailureEventWorkerProperties(
         boolean enabled,
         Duration fixedDelay,
+        Duration recoveryScanInterval,
         // The worker executor uses this value as its bounded queue capacity,
         // ensuring a complete claimed batch can be submitted.
         int batchSize,
@@ -19,11 +20,15 @@ public record FailureEventWorkerProperties(
 
     public FailureEventWorkerProperties {
         Objects.requireNonNull(fixedDelay, "fixedDelay must not be null");
+        Objects.requireNonNull(recoveryScanInterval, "recoveryScanInterval must not be null");
         Objects.requireNonNull(shutdownAwait, "shutdownAwait must not be null");
         Objects.requireNonNull(processingLeaseTimeout, "processingLeaseTimeout must not be null");
 
         if (fixedDelay.isZero() || fixedDelay.isNegative()) {
             throw new IllegalArgumentException("fixedDelay must be greater than zero");
+        }
+        if (recoveryScanInterval.isZero() || recoveryScanInterval.isNegative()) {
+            throw new IllegalArgumentException("recoveryScanInterval must be greater than zero");
         }
         if (batchSize <= 0) {
             throw new IllegalArgumentException("batchSize must be greater than zero");

@@ -62,6 +62,7 @@ failure-event:
     worker:
       enabled: ${FAILURE_EVENT_WORKER_ENABLED:false}
       fixed-delay: ${FAILURE_EVENT_WORKER_FIXED_DELAY:2s}
+      recovery-scan-interval: ${FAILURE_EVENT_RECOVERY_SCAN_INTERVAL:30s}
       batch-size: ${FAILURE_EVENT_WORKER_BATCH_SIZE:8}
       concurrency: ${FAILURE_EVENT_WORKER_CONCURRENCY:2}
       shutdown-await: ${FAILURE_EVENT_WORKER_SHUTDOWN_AWAIT:30s}

@@ -27,6 +27,7 @@ class FailureEventWorkerPropertiesTest {
                 .withPropertyValues(
                         "failure-event.processing.worker.enabled=true",
                         "failure-event.processing.worker.fixed-delay=1500ms",
+                        "failure-event.processing.worker.recovery-scan-interval=750ms",
                         "failure-event.processing.worker.batch-size=12",
                         "failure-event.processing.worker.concurrency=3",
                         "failure-event.processing.worker.processing-lease-timeout=6m",
@@ -36,6 +37,7 @@ class FailureEventWorkerPropertiesTest {
                     FailureEventWorkerProperties properties = context.getBean(FailureEventWorkerProperties.class);
                     assertTrue(properties.enabled());
                     assertEquals(Duration.ofMillis(1500), properties.fixedDelay());
+                    assertEquals(Duration.ofMillis(750), properties.recoveryScanInterval());
                     assertEquals(12, properties.batchSize());
                     assertEquals(3, properties.concurrency());
                     assertEquals(Duration.ofMinutes(6), properties.processingLeaseTimeout());
@@ -50,6 +52,7 @@ class FailureEventWorkerPropertiesTest {
             FailureEventWorkerProperties properties = context.getBean(FailureEventWorkerProperties.class);
             assertFalse(properties.enabled());
             assertEquals(Duration.ofSeconds(2), properties.fixedDelay());
+            assertEquals(Duration.ofSeconds(30), properties.recoveryScanInterval());
             assertEquals(8, properties.batchSize());
             assertEquals(2, properties.concurrency());
             assertEquals(Duration.ofMinutes(5), properties.processingLeaseTimeout());
@@ -61,6 +64,8 @@ class FailureEventWorkerPropertiesTest {
     @ValueSource(strings = {
             "failure-event.processing.worker.fixed-delay=0s",
             "failure-event.processing.worker.fixed-delay=-1s",
+            "failure-event.processing.worker.recovery-scan-interval=0s",
+            "failure-event.processing.worker.recovery-scan-interval=-1s",
             "failure-event.processing.worker.batch-size=0",
             "failure-event.processing.worker.batch-size=-1",
             "failure-event.processing.worker.concurrency=0",

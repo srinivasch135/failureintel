@@ -14,6 +14,7 @@ import org.springframework.context.annotation.Import;
 import org.springframework.scheduling.annotation.EnableScheduling;
 import org.springframework.scheduling.annotation.ScheduledAnnotationBeanPostProcessor;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
+import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.List;
@@ -36,8 +37,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.Mockito.doAnswer;
-import static org.mockito.Mockito.doThrow;
-import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -59,6 +58,7 @@ class FailureEventProcessingWorkerTest {
             assertTrue(context.isRunning());
             assertFalse(context.containsBean("failureEventProcessingWorker"));
             assertFalse(context.containsBean("failureEventNormalizationExecutor"));
+            assertFalse(context.containsBean("taskScheduler"));
             assertTrue(context.getBean(ScheduledAnnotationBeanPostProcessor.class)
                     .getScheduledTasks()
                     .isEmpty());
@@ -71,6 +71,7 @@ class FailureEventProcessingWorkerTest {
                 .withPropertyValues(
                         "failure-event.processing.worker.enabled=true",
                         "failure-event.processing.worker.fixed-delay=1h",
+                        "failure-event.processing.worker.recovery-scan-interval=37s",
                         "failure-event.processing.worker.batch-size=5",
                         "failure-event.processing.worker.concurrency=3",
                         "failure-event.processing.worker.shutdown-await=250ms")
@@ -79,9 +80,10 @@ class FailureEventProcessingWorkerTest {
                     assertEquals("true", context.getEnvironment()
                             .getProperty("failure-event.processing.worker.enabled"));
                     assertTrue(context.containsBean("failureEventProcessingWorker"));
-                    assertEquals(1, context.getBean(ScheduledAnnotationBeanPostProcessor.class)
+                    assertEquals(2, context.getBean(ScheduledAnnotationBeanPostProcessor.class)
                             .getScheduledTasks()
                             .size());
+                    assertEquals(2, context.getBean("taskScheduler", ThreadPoolTaskScheduler.class).getPoolSize());
 
                     ThreadPoolTaskExecutor executor = context.getBean(
                             "failureEventNormalizationExecutor",
@@ -193,7 +195,7 @@ class FailureEventProcessingWorkerTest {
 
                     ScheduledAnnotationBeanPostProcessor scheduledTasks = context.getBean(
                             ScheduledAnnotationBeanPostProcessor.class);
-                    assertEquals(1, scheduledTasks.getScheduledTasks().size());
+                    assertEquals(2, scheduledTasks.getScheduledTasks().size());
 
                     context.close();
 
@@ -253,11 +255,12 @@ class FailureEventProcessingWorkerTest {
     }
 
     @Test
-    void shouldReturnQuietlyWhenNoClaimsAreAvailable() throws NoSuchMethodException {
+    void shouldRunRecoveryOnItsOwnConfiguredSchedule() throws NoSuchMethodException {
         executionContextRunner
                 .withPropertyValues(
                         "failure-event.processing.worker.enabled=true",
                         "failure-event.processing.worker.fixed-delay=1h",
+                        "failure-event.processing.worker.recovery-scan-interval=37s",
                         "failure-event.processing.worker.batch-size=4")
                 .run(context -> {
                     FailureEventProcessingWorker worker = context.getBean(FailureEventProcessingWorker.class);
@@ -267,17 +270,39 @@ class FailureEventProcessingWorkerTest {
                     FailureEventProcessingService processingService = context.getBean(
                             FailureEventProcessingService.class);
 
-                    worker.processNextBatch();
+                    worker.recoverExpiredClaims();
 
-                    var calls = inOrder(recoveryService, claimService);
-                    calls.verify(recoveryService).recoverExpiredClaims(4);
-                    calls.verify(claimService).claimNextEligibleForProcessing(4);
+                    verify(recoveryService, times(1)).recoverExpiredClaims(4);
+                    verifyNoInteractions(claimService);
                     verifyNoInteractions(processingService);
-                    assertEquals(0, context.getBean(
-                            "failureEventNormalizationExecutor",
-                            ThreadPoolTaskExecutor.class).getThreadPoolExecutor().getTaskCount());
                     assertFalse(FailureEventProcessingWorker.class.getMethod("processNextBatch")
                             .isAnnotationPresent(Transactional.class));
+                    assertEquals(
+                            "${failure-event.processing.worker.recovery-scan-interval}",
+                            FailureEventProcessingWorker.class.getMethod("recoverExpiredClaims")
+                                    .getAnnotation(org.springframework.scheduling.annotation.Scheduled.class)
+                                    .fixedDelayString());
+                });
+    }
+
+    @Test
+    void shouldClaimNormallyWithoutRunningRecoveryInTheClaimPath() {
+        executionContextRunner
+                .withPropertyValues(
+                        "failure-event.processing.worker.enabled=true",
+                        "failure-event.processing.worker.fixed-delay=1h",
+                        "failure-event.processing.worker.recovery-scan-interval=1h",
+                        "failure-event.processing.worker.batch-size=4")
+                .run(context -> {
+                    FailureEventProcessingWorker worker = context.getBean(FailureEventProcessingWorker.class);
+                    FailureEventRecoveryService recoveryService = context.getBean(
+                            FailureEventRecoveryService.class);
+                    FailureEventClaimService claimService = context.getBean(FailureEventClaimService.class);
+
+                    worker.processNextBatch();
+
+                    verify(claimService, times(1)).claimNextEligibleForProcessing(4);
+                    verifyNoInteractions(recoveryService);
                 });
     }
 
@@ -287,6 +312,7 @@ class FailureEventProcessingWorkerTest {
                 .withPropertyValues(
                         "failure-event.processing.worker.enabled=true",
                         "failure-event.processing.worker.fixed-delay=1h",
+                        "failure-event.processing.worker.recovery-scan-interval=1h",
                         "failure-event.processing.worker.batch-size=4")
                 .run(context -> {
                     FailureEventProcessingWorker worker = context.getBean(FailureEventProcessingWorker.class);
@@ -314,28 +340,6 @@ class FailureEventProcessingWorkerTest {
                 });
     }
 
-    @Test
-    void shouldStopTheCycleWhenRecoveryFailsWithoutStartingTheClaimTransaction() {
-        executionContextRunner
-                .withPropertyValues(
-                        "failure-event.processing.worker.enabled=true",
-                        "failure-event.processing.worker.fixed-delay=1h",
-                        "failure-event.processing.worker.batch-size=4")
-                .run(context -> {
-                    FailureEventProcessingWorker worker = context.getBean(FailureEventProcessingWorker.class);
-                    FailureEventRecoveryService recoveryService = context.getBean(
-                            FailureEventRecoveryService.class);
-                    FailureEventClaimService claimService = context.getBean(FailureEventClaimService.class);
-                    doThrow(new IllegalStateException("simulated recovery failure"))
-                            .when(recoveryService)
-                            .recoverExpiredClaims(4);
-
-                    worker.processNextBatch();
-
-                    verify(recoveryService, times(1)).recoverExpiredClaims(4);
-                    verifyNoInteractions(claimService);
-                });
-    }
 
     @Test
     void shouldSubmitTheWholeBatchAndAwaitEveryAttemptWhenOneFails() throws Exception {

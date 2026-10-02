@@ -104,6 +104,7 @@ class FailureEventProcessingWorkerRestartIntegrationTest {
                         "--spring.jpa.hibernate.ddl-auto=validate",
                         "--failure-event.processing.worker.enabled=" + workerEnabled,
                         "--failure-event.processing.worker.fixed-delay=100ms",
+                        "--failure-event.processing.worker.recovery-scan-interval=100ms",
                         "--failure-event.processing.worker.shutdown-await=5s",
                         "--failure-event.processing.retry.delays=PT0.01S",
                         "--spring.main.banner-mode=off");

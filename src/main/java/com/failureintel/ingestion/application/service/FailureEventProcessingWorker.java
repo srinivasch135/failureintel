@@ -48,16 +48,6 @@ public class FailureEventProcessingWorker {
     public void processNextBatch() {
         List<ClaimedFailureEvent> claims;
         try {
-            recoveryService.recoverExpiredClaims(workerProperties.batchSize());
-        } catch (RuntimeException recoveryFailure) {
-            LOGGER.error(
-                    "Failure-event worker could not recover expired claims: batchSize={}",
-                    workerProperties.batchSize(),
-                    recoveryFailure);
-            return;
-        }
-
-        try {
             claims = claimService.claimNextEligibleForProcessing(workerProperties.batchSize());
         } catch (RuntimeException claimFailure) {
             LOGGER.error(
@@ -106,6 +96,20 @@ public class FailureEventProcessingWorker {
                         submittedClaims.get(i).attemptNumber(),
                         processingFailure);
             }
+        }
+    }
+
+    @Scheduled(
+            initialDelayString = "${failure-event.processing.worker.recovery-scan-interval}",
+            fixedDelayString = "${failure-event.processing.worker.recovery-scan-interval}")
+    public void recoverExpiredClaims() {
+        try {
+            recoveryService.recoverExpiredClaims(workerProperties.batchSize());
+        } catch (RuntimeException recoveryFailure) {
+            LOGGER.error(
+                    "Failure-event worker could not recover expired claims: batchSize={}",
+                    workerProperties.batchSize(),
+                    recoveryFailure);
         }
     }
 }

@@ -3,6 +3,7 @@ package com.failureintel.ingestion.application.config;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 
 @Configuration(proxyBeanMethods = false)
@@ -11,6 +12,14 @@ import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
         name = "enabled",
         havingValue = "true")
 public class FailureEventWorkerExecutorConfiguration {
+
+    @Bean(name = "taskScheduler")
+    public ThreadPoolTaskScheduler failureEventTaskScheduler() {
+        ThreadPoolTaskScheduler scheduler = new ThreadPoolTaskScheduler();
+        scheduler.setPoolSize(2);
+        scheduler.setThreadNamePrefix("failure-event-scheduler-");
+        return scheduler;
+    }
 
     @Bean
     public ThreadPoolTaskExecutor failureEventNormalizationExecutor(
