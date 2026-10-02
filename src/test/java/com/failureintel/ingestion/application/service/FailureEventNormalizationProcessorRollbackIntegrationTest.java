@@ -16,6 +16,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
 import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.TestPropertySource;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
@@ -30,11 +31,18 @@ import org.testcontainers.utility.DockerImageName;
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
 import static com.failureintel.test.support.FailureEventTestFixtures.validRequest;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -66,10 +74,16 @@ class FailureEventNormalizationProcessorRollbackIntegrationTest {
     private FailureEventClaimService claimService;
 
     @Autowired
+    private FailureEventRecoveryService recoveryService;
+
+    @Autowired
     private FailureEventNormalizationProcessor processor;
 
     @Autowired
     private FailureEventProcessingService processingService;
+
+    @Autowired
+    private FailureEventRetryStateRecorder retryStateRecorder;
 
     @Autowired
     private FailureEventRepository failureEventRepository;
@@ -206,6 +220,102 @@ class FailureEventNormalizationProcessorRollbackIntegrationTest {
         assertEquals("NORMALIZED_WRITE_FAILURE", persistedRawEvent.getFailureCode());
         assertFalse(normalizedFailureEventRepository.existsById(eventId));
         assertNotNull(persistedRawEvent.getNextAttemptAt());
+    }
+
+    @Test
+    void shouldRollBackStaleAttemptWhenRecoveryAndNewClaimWinBeforeItCommits() throws Exception {
+        UUID eventId = UUID.fromString(
+                ingestionService.ingestFailureEvent(validRequest("trace-stale-attempt-race-001")));
+        ClaimedFailureEvent attemptN = claimService
+                .claimNextEligibleForProcessing(1)
+                .get(0);
+        assertEquals(1, attemptN.attemptNumber());
+
+        CountDownLatch normalizationStarted = new CountDownLatch(1);
+        CountDownLatch finishNormalization = new CountDownLatch(1);
+        when(failureEventNormalizer.normalize(any())).thenAnswer(invocation -> {
+            normalizationStarted.countDown();
+            if (!finishNormalization.await(10, TimeUnit.SECONDS)) {
+                throw new IllegalStateException("Timed out waiting to finish stale normalization");
+            }
+            return successfulNormalizedEvent("stale-attempt-service");
+        });
+
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        try {
+            Future<Throwable> staleAttemptResult = executor.submit(() -> {
+                try {
+                    processor.process(attemptN);
+                    return null;
+                } catch (Throwable failure) {
+                    return failure;
+                }
+            });
+
+            assertTrue(normalizationStarted.await(5, TimeUnit.SECONDS),
+                    "Attempt N should load and verify its claim before the lease is recovered");
+
+            jdbcTemplate.update(
+                    "UPDATE failure_event SET processing_started_at = ?, version = version + 1 "
+                            + "WHERE event_id = ?",
+                    Timestamp.from(Instant.now().minusSeconds(3600)),
+                    eventId);
+
+            recoveryService.recoverExpiredClaims(1);
+            FailureEventEntity recovered = failureEventRepository.findById(eventId).orElseThrow();
+            assertEquals(ProcessingStatus.RETRYABLE, recovered.getProcessingStatus());
+            assertEquals(1, recovered.getAttemptCount(), "Recovery must not count another attempt");
+            assertEquals("WORKER_LEASE_EXPIRED", recovered.getFailureCode());
+            assertNotNull(recovered.getNextAttemptAt());
+            assertNull(recovered.getProcessingStartedAt());
+
+            jdbcTemplate.update(
+                    "UPDATE failure_event SET next_attempt_at = ?, version = version + 1 "
+                            + "WHERE event_id = ?",
+                    Timestamp.from(Instant.now().minusSeconds(1)),
+                    eventId);
+            ClaimedFailureEvent attemptNPlus1 = claimService
+                    .claimNextEligibleForProcessing(1)
+                    .stream()
+                    .filter(claim -> claim.eventId().equals(eventId))
+                    .findFirst()
+                    .orElseThrow();
+            assertEquals(2, attemptNPlus1.attemptNumber());
+
+            finishNormalization.countDown();
+            Throwable staleFailure = staleAttemptResult.get(10, TimeUnit.SECONDS);
+            assertNotNull(staleFailure,
+                    "Attempt N must fail when its transaction tries to commit with an obsolete entity version");
+            assertInstanceOf(OptimisticLockingFailureException.class, staleFailure);
+
+            FailureEventEntity currentAttempt = failureEventRepository.findById(eventId).orElseThrow();
+            assertEquals(ProcessingStatus.PROCESSING, currentAttempt.getProcessingStatus());
+            assertEquals(2, currentAttempt.getAttemptCount());
+            assertNotNull(currentAttempt.getProcessingStartedAt());
+            assertEquals(currentAttempt.getLastAttemptAt(), currentAttempt.getProcessingStartedAt());
+            assertNull(currentAttempt.getFailureCode());
+            assertNull(currentAttempt.getFailureReason());
+            assertNull(currentAttempt.getNextAttemptAt());
+            assertFalse(normalizedFailureEventRepository.existsById(eventId),
+                    "The normalized row from stale Attempt N must roll back with its raw status update");
+
+            assertFalse(retryStateRecorder.recordFailure(
+                    attemptN,
+                    FailureEventRetryableFailure.DATABASE_TIMEOUT,
+                    Optional.of(Instant.now().plusSeconds(60))),
+                    "Attempt N must not record retry state after Attempt N+1 owns the event");
+
+            FailureEventEntity afterStaleFailureRecord = failureEventRepository.findById(eventId).orElseThrow();
+            assertEquals(ProcessingStatus.PROCESSING, afterStaleFailureRecord.getProcessingStatus());
+            assertEquals(2, afterStaleFailureRecord.getAttemptCount());
+            assertNull(afterStaleFailureRecord.getFailureCode());
+            assertNull(afterStaleFailureRecord.getNextAttemptAt());
+            assertFalse(normalizedFailureEventRepository.existsById(eventId));
+        } finally {
+            finishNormalization.countDown();
+            executor.shutdownNow();
+            assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS));
+        }
     }
 
     private NormalizedFailureEvent normalizedEventExceedingDatabaseColumnLength() {
