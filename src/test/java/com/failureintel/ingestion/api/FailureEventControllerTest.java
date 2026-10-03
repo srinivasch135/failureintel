@@ -3,6 +3,7 @@ package com.failureintel.ingestion.api;
 import com.failureintel.infrastructure.web.exception.GlobalExceptionHandler;
 import com.failureintel.ingestion.api.dto.FailureEventIngestionRequest;
 import com.failureintel.ingestion.api.dto.FailureEventResponse;
+import com.failureintel.ingestion.domain.normalization.NormalizationStatus;
 import com.failureintel.ingestion.application.exception.FailureEventNotFoundException;
 import com.failureintel.ingestion.application.service.FailureEventQueryService;
 import com.failureintel.ingestion.application.useCase.IngestFailureEventUseCase;
@@ -188,7 +189,15 @@ class FailureEventControllerTest {
                 "Payment provider timed out",
                 "payment-provider",
                 "HIGH",
-                Instant.parse("2026-08-24T10:14:30Z"));
+                Instant.parse("2026-08-24T10:14:30Z"),
+                1,
+                Instant.parse("2026-08-24T10:15:29Z"),
+                null,
+                null,
+                null,
+                true,
+                NormalizationStatus.FULLY_NORMALIZED,
+                Instant.parse("2026-08-24T10:15:30Z"));
 
         when(failureEventQueryService.getFailureEvent(eventId)).thenReturn(response);
 
@@ -229,7 +238,15 @@ class FailureEventControllerTest {
                 "Payment provider timed out",
                 "payment-provider",
                 "HIGH",
-                Instant.parse("2026-08-24T10:14:30Z"));
+                Instant.parse("2026-08-24T10:14:30Z"),
+                1,
+                Instant.parse("2026-08-24T10:15:29Z"),
+                null,
+                null,
+                null,
+                true,
+                NormalizationStatus.FULLY_NORMALIZED,
+                Instant.parse("2026-08-24T10:15:30Z"));
 
         when(failureEventQueryService.getFailureEventByTraceId(traceId)).thenReturn(response);
 
@@ -269,7 +286,15 @@ class FailureEventControllerTest {
                 "Payment provider timed out",
                 "payment-provider",
                 "HIGH",
-                Instant.parse("2026-08-24T10:14:30Z"));
+                Instant.parse("2026-08-24T10:14:30Z"),
+                1,
+                Instant.parse("2026-08-24T10:15:29Z"),
+                null,
+                null,
+                null,
+                true,
+                NormalizationStatus.FULLY_NORMALIZED,
+                Instant.parse("2026-08-24T10:15:30Z"));
 
         when(failureEventQueryService.searchFailureEvents(
                 eq("checkout-service"),
