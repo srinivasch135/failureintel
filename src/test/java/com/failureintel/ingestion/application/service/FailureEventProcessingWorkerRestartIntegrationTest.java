@@ -23,6 +23,8 @@ import java.util.UUID;
 
 import static com.failureintel.test.support.FailureEventTestFixtures.validRequest;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @Testcontainers
@@ -72,11 +74,32 @@ class FailureEventProcessingWorkerRestartIntegrationTest {
             FailureEventRepository failureEventRepository = restartedContext.getBean(FailureEventRepository.class);
             NormalizedFailureEventRepository normalizedRepository = restartedContext.getBean(
                     NormalizedFailureEventRepository.class);
+            JdbcTemplate jdbcTemplate = restartedContext.getBean(JdbcTemplate.class);
 
             assertTrue(failureEventRepository.existsById(abandonedClaimId),
                     "The raw event should remain stored when the first application context closes");
             assertTrue(failureEventRepository.existsById(receivedEventId),
                     "The received event should remain stored when the first application context closes");
+
+            Awaitility.await()
+                    .atMost(Duration.ofSeconds(10))
+                    .untilAsserted(() -> {
+                        FailureEventEntity recovered = failureEventRepository.findById(abandonedClaimId)
+                                .orElseThrow();
+                        assertEquals(ProcessingStatus.RETRYABLE, recovered.getProcessingStatus());
+                        assertEquals(1, recovered.getAttemptCount(),
+                                "Recovery must not consume another attempt");
+                        assertEquals("WORKER_LEASE_EXPIRED", recovered.getFailureCode());
+                        assertNotNull(recovered.getNextAttemptAt());
+                        assertTrue(recovered.getNextAttemptAt().isAfter(Instant.now()),
+                                "The retry should wait for its configured backoff");
+                        assertNull(recovered.getProcessingStartedAt());
+                    });
+
+            jdbcTemplate.update(
+                    "UPDATE failure_event SET next_attempt_at = ?, version = version + 1 WHERE event_id = ?",
+                    Timestamp.from(Instant.now().minusSeconds(1)),
+                    abandonedClaimId);
 
             Awaitility.await()
                     .atMost(Duration.ofSeconds(10))
@@ -106,7 +129,7 @@ class FailureEventProcessingWorkerRestartIntegrationTest {
                         "--failure-event.processing.worker.fixed-delay=100ms",
                         "--failure-event.processing.worker.recovery-scan-interval=100ms",
                         "--failure-event.processing.worker.shutdown-await=5s",
-                        "--failure-event.processing.retry.delays=PT0.01S",
+                        "--failure-event.processing.retry.delays=PT1M",
                         "--spring.main.banner-mode=off");
     }
 }

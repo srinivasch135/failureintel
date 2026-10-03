@@ -23,6 +23,7 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.utility.DockerImageName;
 
 import java.sql.Timestamp;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.HashSet;
 import java.util.List;
@@ -34,16 +35,19 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
 
@@ -311,6 +315,11 @@ class FailureEventClaimServiceIntegrationTest {
         assertEquals(1, recovered.getAttemptCount());
         assertEquals("WORKER_LEASE_EXPIRED", recovered.getFailureCode());
         assertNotNull(recovered.getNextAttemptAt());
+        Instant observedAt = Instant.now();
+        assertTrue(recovered.getNextAttemptAt().isAfter(observedAt.plusSeconds(47)),
+                "First recovery retry should use the configured one-minute delay and jitter range");
+        assertTrue(recovered.getNextAttemptAt().isBefore(observedAt.plusSeconds(73)),
+                "First recovery retry should not exceed the configured one-minute delay and jitter range");
         assertNull(recovered.getProcessingStartedAt());
 
         jdbcTemplate.update(
@@ -344,6 +353,142 @@ class FailureEventClaimServiceIntegrationTest {
         assertEquals("RETRY_EXHAUSTED", recovered.getFailureCode());
         assertNull(recovered.getProcessingStartedAt());
         assertNull(recovered.getNextAttemptAt());
+    }
+
+    @Test
+    void shouldLeaveAnUnexpiredProcessingLeaseUntouched() {
+        Instant attemptStartedAt = Instant.now();
+        FailureEventEntity active = persistProcessingEvent("active-processing-lease", attemptStartedAt);
+        long versionBeforeRecovery = jdbcTemplate.queryForObject(
+                "SELECT version FROM failure_event WHERE event_id = ?",
+                Long.class,
+                active.getEventId());
+
+        recoveryService.recoverExpiredClaims(1);
+
+        FailureEventEntity afterRecovery = failureEventRepository.findById(active.getEventId()).orElseThrow();
+        assertEquals(ProcessingStatus.PROCESSING, afterRecovery.getProcessingStatus());
+        assertEquals(1, afterRecovery.getAttemptCount());
+        assertTrue(Math.abs(Duration.between(attemptStartedAt, afterRecovery.getProcessingStartedAt()).toNanos())
+                        <= 1_000,
+                "The persisted lease timestamp should match the inserted value within PostgreSQL precision");
+        assertNull(afterRecovery.getNextAttemptAt());
+        assertEquals(versionBeforeRecovery, jdbcTemplate.queryForObject(
+                "SELECT version FROM failure_event WHERE event_id = ?",
+                Long.class,
+                active.getEventId()),
+                "Recovery must not update or version-bump an unexpired claim");
+    }
+
+    @Test
+    void shouldRecoverOneStaleAttemptOnlyOnceWhenRecoveryCallsOverlap() throws Exception {
+        FailureEventEntity abandoned = persistProcessingEvent(
+                "concurrent-recovery-attempt",
+                Instant.now().minusSeconds(3600));
+        long versionBeforeRecovery = jdbcTemplate.queryForObject(
+                "SELECT version FROM failure_event WHERE event_id = ?",
+                Long.class,
+                abandoned.getEventId());
+        CountDownLatch firstRecoveryLockedRow = new CountDownLatch(1);
+        CountDownLatch releaseFirstRecovery = new CountDownLatch(1);
+        AtomicBoolean pauseFirstRecovery = new AtomicBoolean(true);
+        doAnswer(invocation -> {
+            if (pauseFirstRecovery.compareAndSet(true, false)) {
+                firstRecoveryLockedRow.countDown();
+                awaitLatch(releaseFirstRecovery, "Interrupted while holding the first recovery transaction");
+            }
+            return invocation.callRealMethod();
+        }).when(retryPolicySpy).nextAttemptAt(1);
+
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        try {
+            Future<?> firstRecovery = executor.submit(() -> recoveryService.recoverExpiredClaims(1));
+            assertTrue(firstRecoveryLockedRow.await(5, TimeUnit.SECONDS),
+                    "The first recovery should hold the selected row lock while calculating backoff");
+
+            recoveryService.recoverExpiredClaims(1);
+
+            releaseFirstRecovery.countDown();
+            firstRecovery.get(5, TimeUnit.SECONDS);
+        } finally {
+            releaseFirstRecovery.countDown();
+            executor.shutdownNow();
+        }
+
+        FailureEventEntity recovered = failureEventRepository.findById(abandoned.getEventId()).orElseThrow();
+        assertEquals(ProcessingStatus.RETRYABLE, recovered.getProcessingStatus());
+        assertEquals(1, recovered.getAttemptCount(), "Recovery must not consume another attempt");
+        assertEquals("WORKER_LEASE_EXPIRED", recovered.getFailureCode());
+        assertNull(recovered.getProcessingStartedAt());
+        assertEquals(versionBeforeRecovery + 1, jdbcTemplate.queryForObject(
+                "SELECT version FROM failure_event WHERE event_id = ?",
+                Long.class,
+                abandoned.getEventId()),
+                "Exactly one recovery transition should commit for the stale attempt");
+    }
+
+    @Test
+    void shouldNotLetAnOlderRetryRecorderOverwriteRecovery() throws Exception {
+        FailureEventEntity abandoned = persistProcessingEvent(
+                "recovery-retry-recorder-race",
+                Instant.now().minusSeconds(3600));
+        ClaimedFailureEvent oldClaim = new ClaimedFailureEvent(abandoned.getEventId(), 1);
+        FailureEventEntity staleSnapshot = failureEventRepository.findById(abandoned.getEventId()).orElseThrow();
+        CountDownLatch retryRecorderReadyToSave = new CountDownLatch(1);
+        CountDownLatch allowRetryRecorderToSave = new CountDownLatch(1);
+        doAnswer(invocation -> {
+            retryRecorderReadyToSave.countDown();
+            awaitLatch(allowRetryRecorderToSave, "Interrupted while pausing the retry recorder");
+            return Optional.of(staleSnapshot);
+        }).when(failureEventRepositorySpy).findById(any());
+
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        try {
+            Future<Throwable> retryRecord = executor.submit(() -> {
+                try {
+                    retryStateRecorder.recordFailure(
+                            oldClaim,
+                            FailureEventRetryableFailure.DATABASE_TIMEOUT,
+                            Optional.of(Instant.now().plusSeconds(60)));
+                    return null;
+                } catch (RuntimeException failure) {
+                    return failure;
+                }
+            });
+
+            assertTrue(retryRecorderReadyToSave.await(5, TimeUnit.SECONDS),
+                    "The retry recorder should load the old PROCESSING version before recovery");
+            recoveryService.recoverExpiredClaims(1);
+            allowRetryRecorderToSave.countDown();
+
+            Throwable staleRetryFailure = retryRecord.get(5, TimeUnit.SECONDS);
+            assertInstanceOf(OptimisticLockingFailureException.class, staleRetryFailure,
+                    "The old retry recorder must fail its commit after recovery advances the row version");
+        } finally {
+            allowRetryRecorderToSave.countDown();
+            executor.shutdownNow();
+        }
+
+        assertEquals(ProcessingStatus.RETRYABLE.name(), jdbcTemplate.queryForObject(
+                "SELECT processing_status FROM failure_event WHERE event_id = ?",
+                String.class,
+                abandoned.getEventId()));
+        assertEquals(1, jdbcTemplate.queryForObject(
+                "SELECT attempt_count FROM failure_event WHERE event_id = ?",
+                Integer.class,
+                abandoned.getEventId()));
+        assertEquals("WORKER_LEASE_EXPIRED", jdbcTemplate.queryForObject(
+                "SELECT failure_code FROM failure_event WHERE event_id = ?",
+                String.class,
+                abandoned.getEventId()));
+        assertNull(jdbcTemplate.queryForObject(
+                "SELECT processing_started_at FROM failure_event WHERE event_id = ?",
+                Timestamp.class,
+                abandoned.getEventId()));
+        assertNotNull(jdbcTemplate.queryForObject(
+                "SELECT next_attempt_at FROM failure_event WHERE event_id = ?",
+                Timestamp.class,
+                abandoned.getEventId()));
     }
 
     @Test
@@ -544,6 +689,16 @@ class FailureEventClaimServiceIntegrationTest {
         assertEquals(ProcessingStatus.PROCESSING, secondAfterRollback.getProcessingStatus());
         assertEquals(1, firstAfterRollback.getAttemptCount());
         assertEquals(1, secondAfterRollback.getAttemptCount());
+
+        doReturn(Optional.of(Instant.now().plusSeconds(60)))
+                .when(retryPolicySpy)
+                .nextAttemptAt(1);
+        recoveryService.recoverExpiredClaims(2);
+
+        assertEquals(ProcessingStatus.RETRYABLE,
+                failureEventRepository.findById(firstExpired.getEventId()).orElseThrow().getProcessingStatus());
+        assertEquals(ProcessingStatus.RETRYABLE,
+                failureEventRepository.findById(secondExpired.getEventId()).orElseThrow().getProcessingStatus());
     }
 
     @Test
@@ -660,6 +815,17 @@ class FailureEventClaimServiceIntegrationTest {
                 throw new IllegalStateException("Interrupted while holding row lock", exception);
             }
         });
+    }
+
+    private void awaitLatch(CountDownLatch latch, String interruptedMessage) {
+        try {
+            if (!latch.await(10, TimeUnit.SECONDS)) {
+                throw new IllegalStateException("Timed out waiting for recovery race synchronization");
+            }
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException(interruptedMessage, exception);
+        }
     }
 
     private FailureEventEntity persistEvent(String traceId, ProcessingStatus status, Instant ingestedAt) {

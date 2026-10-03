@@ -37,6 +37,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -282,6 +283,53 @@ class FailureEventProcessingWorkerTest {
                             FailureEventProcessingWorker.class.getMethod("recoverExpiredClaims")
                                     .getAnnotation(org.springframework.scheduling.annotation.Scheduled.class)
                                     .fixedDelayString());
+                });
+    }
+
+    @Test
+    void shouldRunScheduledRecoveryWhileANormalizationAttemptIsBlocked() throws InterruptedException {
+        ClaimedFailureEvent claim = new ClaimedFailureEvent(UUID.randomUUID(), 1);
+        CountDownLatch normalizationStarted = new CountDownLatch(1);
+        CountDownLatch allowNormalizationToFinish = new CountDownLatch(1);
+        CountDownLatch recoveryRan = new CountDownLatch(1);
+
+        contextRunner
+                .withPropertyValues(
+                        "failure-event.processing.worker.enabled=true",
+                        "failure-event.processing.worker.fixed-delay=20ms",
+                        "failure-event.processing.worker.recovery-scan-interval=25ms",
+                        "failure-event.processing.worker.batch-size=1",
+                        "failure-event.processing.worker.concurrency=1",
+                        "failure-event.processing.worker.shutdown-await=1s")
+                .run(context -> {
+                    FailureEventClaimService claimService = context.getBean(FailureEventClaimService.class);
+                    FailureEventRecoveryService recoveryService = context.getBean(
+                            FailureEventRecoveryService.class);
+                    FailureEventProcessingService processingService = context.getBean(
+                            FailureEventProcessingService.class);
+                    when(claimService.claimNextEligibleForProcessing(1))
+                            .thenReturn(List.of(claim), List.of());
+                    doAnswer(invocation -> {
+                        normalizationStarted.countDown();
+                        awaitLatch(allowNormalizationToFinish);
+                        return null;
+                    }).when(processingService).process(claim);
+                    doAnswer(invocation -> {
+                        if (normalizationStarted.getCount() == 0) {
+                            recoveryRan.countDown();
+                        }
+                        return null;
+                    }).when(recoveryService).recoverExpiredClaims(1);
+
+                    try {
+                        assertTrue(normalizationStarted.await(2, TimeUnit.SECONDS),
+                                "The scheduled worker should begin the claimed normalization");
+                        assertTrue(recoveryRan.await(2, TimeUnit.SECONDS),
+                                "The independent recovery schedule should run while normalization is blocked");
+                        verify(recoveryService, atLeastOnce()).recoverExpiredClaims(1);
+                    } finally {
+                        allowNormalizationToFinish.countDown();
+                    }
                 });
     }
 
