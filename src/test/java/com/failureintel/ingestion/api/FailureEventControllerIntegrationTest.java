@@ -6,8 +6,11 @@ import com.failureintel.infrastructure.persistence.failureevent.entity.Processin
 import com.failureintel.infrastructure.persistence.normalizedFailureEvent.entity.NormalizedFailureEventEntity;
 import com.failureintel.infrastructure.persistence.normalizedFailureEvent.repository.NormalizedFailureEventRepository;
 import com.failureintel.ingestion.api.dto.FailureEventIngestionRequest;
+import com.failureintel.ingestion.api.dto.FailureEventResponse;
 import com.failureintel.ingestion.application.service.FailureEventIngestionService;
+import com.failureintel.ingestion.application.service.FailureEventQueryService;
 import com.failureintel.ingestion.domain.normalization.NormalizationStatus;
+import jakarta.persistence.EntityManager;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -18,6 +21,10 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
+import org.springframework.dao.DataAccessResourceFailureException;
+import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
 import org.springframework.test.context.TestPropertySource;
@@ -36,7 +43,13 @@ import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
@@ -46,6 +59,9 @@ import static org.springframework.http.MediaType.APPLICATION_JSON;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doThrow;
 
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @AutoConfigureMockMvc
@@ -81,10 +97,22 @@ class FailureEventControllerIntegrationTest {
     private FailureEventIngestionService ingestionService;
 
     @Autowired
+    private FailureEventQueryService queryService;
+
+    @Autowired
+    private EntityManager entityManager;
+
+    @Autowired
+    private PlatformTransactionManager transactionManager;
+
+    @Autowired
     private FailureEventRepository failureEventRepository;
 
     @Autowired
     private NormalizedFailureEventRepository normalizedFailureEventRepository;
+
+    @MockitoSpyBean
+    private NormalizedFailureEventRepository normalizedFailureEventRepositorySpy;
 
     @AfterEach
     void cleanUp() {
@@ -195,6 +223,125 @@ class FailureEventControllerIntegrationTest {
                 .andExpect(jsonPath("$.dependencyTarget").value("payment-database"))
                 .andExpect(jsonPath("$.severity").value("HIGH"))
                 .andExpect(jsonPath("$.occurredAt").value("2026-08-03T20:00:00Z"));
+    }
+
+    @Test
+    void shouldExposePersistedMetadataForEveryProcessingLifecycleState() throws Exception {
+        FailureEventEntity received = persistEventWithStatus("RECEIVED", ProcessingStatus.RECEIVED);
+        FailureEventEntity processing = persistEventWithStatus("PROCESSING", ProcessingStatus.PROCESSING);
+        FailureEventEntity retryable = persistEventWithStatus("RETRYABLE", ProcessingStatus.RETRYABLE);
+        FailureEventEntity failed = persistEventWithStatus("FAILED", ProcessingStatus.FAILED);
+        FailureEventEntity normalized = persistEventWithStatus("NORMALIZED", ProcessingStatus.NORMALIZED);
+        persistNormalizedEvent(normalized);
+
+        mockMvc.perform(get("/api/v1/failure-events/{eventId}", received.getEventId()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.processingStatus").value("RECEIVED"))
+                .andExpect(jsonPath("$.attemptCount").value(0))
+                .andExpect(jsonPath("$.lastAttemptAt").doesNotExist())
+                .andExpect(jsonPath("$.nextAttemptAt").doesNotExist())
+                .andExpect(jsonPath("$.normalizedAvailable").value(false));
+
+        mockMvc.perform(get("/api/v1/failure-events/{eventId}", processing.getEventId()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.processingStatus").value("PROCESSING"))
+                .andExpect(jsonPath("$.attemptCount").value(1))
+                .andExpect(jsonPath("$.lastAttemptAt").value("2026-08-03T20:00:01Z"))
+                .andExpect(jsonPath("$.nextAttemptAt").doesNotExist())
+                .andExpect(jsonPath("$.normalizedAvailable").value(false));
+
+        mockMvc.perform(get("/api/v1/failure-events/{eventId}", retryable.getEventId()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.processingStatus").value("RETRYABLE"))
+                .andExpect(jsonPath("$.attemptCount").value(1))
+                .andExpect(jsonPath("$.nextAttemptAt").exists())
+                .andExpect(jsonPath("$.failureCode").value("DATABASE_TIMEOUT"))
+                .andExpect(jsonPath("$.failureReason").value(
+                        "Failure-event processing could not complete; another attempt is scheduled."));
+
+        mockMvc.perform(get("/api/v1/failure-events/{eventId}", failed.getEventId()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.processingStatus").value("FAILED"))
+                .andExpect(jsonPath("$.attemptCount").value(1))
+                .andExpect(jsonPath("$.nextAttemptAt").doesNotExist())
+                .andExpect(jsonPath("$.failureCode").value("MALFORMED_EVENT"))
+                .andExpect(jsonPath("$.failureReason").value("The failure event could not be interpreted."));
+
+        mockMvc.perform(get("/api/v1/failure-events/{eventId}", normalized.getEventId()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.processingStatus").value("NORMALIZED"))
+                .andExpect(jsonPath("$.attemptCount").value(1))
+                .andExpect(jsonPath("$.failureCode").doesNotExist())
+                .andExpect(jsonPath("$.normalizedAvailable").value(true))
+                .andExpect(jsonPath("$.normalizationStatus").value("FULLY_NORMALIZED"));
+    }
+
+    @Test
+    void shouldPreserveNormalizedStatusWhenNormalizedRowIsMissing() throws Exception {
+        FailureEventEntity normalizedWithoutRow = persistEventWithStatus(
+                "normalized-without-row",
+                ProcessingStatus.NORMALIZED);
+
+        mockMvc.perform(get("/api/v1/failure-events/{eventId}", normalizedWithoutRow.getEventId()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.processingStatus").value("NORMALIZED"))
+                .andExpect(jsonPath("$.normalizedAvailable").value(false))
+                .andExpect(jsonPath("$.normalizationStatus").doesNotExist())
+                .andExpect(jsonPath("$.normalizedAt").doesNotExist());
+    }
+
+    @Test
+    void shouldReturnServerErrorWhenNormalizedLookupFails() throws Exception {
+        FailureEventEntity event = persistEventWithStatus("lookup-failure", ProcessingStatus.RECEIVED);
+        doThrow(new DataAccessResourceFailureException("simulated database failure"))
+                .when(normalizedFailureEventRepositorySpy).findById(event.getEventId());
+
+        mockMvc.perform(get("/api/v1/failure-events/{eventId}", event.getEventId()))
+                .andExpect(status().isInternalServerError())
+                .andExpect(jsonPath("$.error").value("DATABASE_ERROR"));
+    }
+
+    @Test
+    void shouldKeepDirectReadOnOneSnapshotDuringConcurrentNormalization() throws Exception {
+        FailureEventEntity processingEvent = persistEventWithStatus(
+                "snapshot-race",
+                ProcessingStatus.PROCESSING);
+        UUID eventId = processingEvent.getEventId();
+        CountDownLatch rawReadCompleted = new CountDownLatch(1);
+        CountDownLatch continueRead = new CountDownLatch(1);
+        doAnswer(invocation -> {
+            rawReadCompleted.countDown();
+            if (!continueRead.await(10, TimeUnit.SECONDS)) {
+                throw new IllegalStateException("Timed out waiting to continue direct read");
+            }
+            return Optional.ofNullable(entityManager.find(NormalizedFailureEventEntity.class, eventId));
+        }).when(normalizedFailureEventRepositorySpy).findById(eventId);
+
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        try {
+            Future<FailureEventResponse> responseFuture = executor.submit(() -> queryService.getFailureEvent(eventId));
+            assertTrue(rawReadCompleted.await(10, TimeUnit.SECONDS), "direct read did not load raw state");
+
+            TransactionTemplate writerTransaction = new TransactionTemplate(transactionManager);
+            writerTransaction.executeWithoutResult(status -> {
+                FailureEventEntity rawEvent = entityManager.find(FailureEventEntity.class, eventId);
+                rawEvent.markNormalized();
+                NormalizedFailureEventEntity normalizedEvent = normalizedEvent(rawEvent);
+                entityManager.persist(normalizedEvent);
+            });
+            continueRead.countDown();
+
+            FailureEventResponse concurrentResponse = responseFuture.get(10, TimeUnit.SECONDS);
+            assertEquals("PROCESSING", concurrentResponse.processingStatus());
+            assertFalse(concurrentResponse.normalizedAvailable());
+
+            FailureEventResponse subsequentResponse = queryService.getFailureEvent(eventId);
+            assertEquals("NORMALIZED", subsequentResponse.processingStatus());
+            assertTrue(subsequentResponse.normalizedAvailable());
+        } finally {
+            continueRead.countDown();
+            executor.shutdownNow();
+        }
     }
 
     @Test
@@ -396,6 +543,54 @@ class FailureEventControllerIntegrationTest {
                   }
                 }
                 """;
+    }
+
+    private FailureEventEntity persistEventWithStatus(String suffix, ProcessingStatus processingStatus) {
+        FailureEventIngestionRequest request = validRequest();
+        request.setTraceId("trace-query-" + suffix);
+        UUID eventId = UUID.fromString(ingestionService.ingestFailureEvent(request));
+        FailureEventEntity event = failureEventRepository.findById(eventId).orElseThrow();
+        if (processingStatus != ProcessingStatus.RECEIVED) {
+            Instant claimedAt = Instant.parse("2026-08-03T20:00:01Z");
+            event.claimForProcessing(claimedAt);
+            switch (processingStatus) {
+                case PROCESSING -> { }
+                case RETRYABLE -> event.markRetryable(
+                        "DATABASE_TIMEOUT",
+                        "internal database exception must not be exposed",
+                        Instant.parse("2026-08-03T20:05:01Z"));
+                case FAILED -> event.markFailed(
+                        "MALFORMED_EVENT",
+                        "internal parser exception must not be exposed");
+                case NORMALIZED -> event.markNormalized();
+                case RECEIVED -> throw new IllegalStateException("Unexpected RECEIVED transition");
+            }
+            event = failureEventRepository.saveAndFlush(event);
+        }
+        return event;
+    }
+
+    private void persistNormalizedEvent(FailureEventEntity rawEvent) {
+        normalizedFailureEventRepository.saveAndFlush(normalizedEvent(rawEvent));
+    }
+
+    private NormalizedFailureEventEntity normalizedEvent(FailureEventEntity rawEvent) {
+        NormalizedFailureEventEntity normalizedEvent = new NormalizedFailureEventEntity();
+        normalizedEvent.setFailureEvent(rawEvent);
+        normalizedEvent.setNormalizedPayload(Map.of("test", "normalized"));
+        normalizedEvent.setNormalizedServiceName("normalized-service");
+        normalizedEvent.setNormalizedEnvironment("normalized-environment");
+        normalizedEvent.setNormalizedEventType("normalized-event");
+        normalizedEvent.setNormalizedErrorType("NormalizedError");
+        normalizedEvent.setNormalizedErrorMessage("normalized message");
+        normalizedEvent.setNormalizedDependencyTarget("normalized-dependency");
+        normalizedEvent.setNormalizedTraceId(rawEvent.getTraceId());
+        normalizedEvent.setNormalizedSeverity("high");
+        normalizedEvent.setNormalizedOccurredAt(Instant.parse("2026-08-03T20:00:00Z"));
+        normalizedEvent.setNormalizationStatus(NormalizationStatus.FULLY_NORMALIZED);
+        normalizedEvent.setNormalizationMetadata(Map.of());
+        normalizedEvent.setNormalizedAt(Instant.parse("2026-08-03T20:00:02Z"));
+        return normalizedEvent;
     }
 
     private void persistNormalizedSearchFixture(UUID eventId) {

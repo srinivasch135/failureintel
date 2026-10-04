@@ -15,6 +15,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageImpl;
 import org.springframework.data.domain.PageRequest;
+import org.springframework.dao.DataAccessResourceFailureException;
 
 import java.time.Instant;
 import java.util.List;
@@ -23,6 +24,7 @@ import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -67,8 +69,22 @@ class FailureEventQueryServiceTest {
         assertEquals(eventId, response.eventId());
         assertEquals("raw-service", response.serviceName());
         assertEquals("raw message", response.message());
+        assertEquals("NORMALIZED", response.processingStatus());
+        assertFalse(response.normalizedAvailable());
         verify(failureEventRepository).findById(eventId);
         verify(normalizedFailureEventRepository).findById(eventId);
+    }
+
+    @Test
+    void shouldPropagateNormalizedLookupFailureInsteadOfTreatingItAsMissing() {
+        UUID eventId = UUID.randomUUID();
+        when(failureEventRepository.findById(eventId)).thenReturn(Optional.of(rawEvent(eventId)));
+        when(normalizedFailureEventRepository.findById(eventId))
+                .thenThrow(new DataAccessResourceFailureException("normalized lookup failed"));
+
+        assertThrows(
+                DataAccessResourceFailureException.class,
+                () -> queryService.getFailureEvent(eventId));
     }
 
     @Test
