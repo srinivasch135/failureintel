@@ -9,8 +9,11 @@ import jakarta.servlet.http.HttpServletRequestWrapper;
 import jakarta.servlet.http.HttpServletResponse;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.server.RequestPath;
 import org.springframework.stereotype.Component;
 import org.springframework.web.filter.OncePerRequestFilter;
+import org.springframework.web.util.pattern.PathPattern;
+import org.springframework.web.util.pattern.PathPatternParser;
 
 import java.io.BufferedReader;
 import java.io.ByteArrayInputStream;
@@ -23,7 +26,8 @@ import java.util.Locale;
 @Component
 public class RequestSizeLimitFilter extends OncePerRequestFilter {
 
-    private static final String INGESTION_PATH = "/api/v1/failure-events";
+    private static final PathPattern INGESTION_PATH =
+            PathPatternParser.defaultInstance.parse("/api/v1/failure-events");
 
     private final int maxRequestSizeBytes;
 
@@ -40,6 +44,11 @@ public class RequestSizeLimitFilter extends OncePerRequestFilter {
             HttpServletRequest request,
             HttpServletResponse response,
             FilterChain filterChain) throws ServletException, IOException {
+        if (isIngestionPathParameterVariant(request)) {
+            rejectPathParameters(response);
+            return;
+        }
+
         if (!isJsonIngestionRequest(request)) {
             filterChain.doFilter(request, response);
             return;
@@ -62,15 +71,68 @@ public class RequestSizeLimitFilter extends OncePerRequestFilter {
     private boolean isJsonIngestionRequest(HttpServletRequest request) {
         String contentType = request.getContentType();
         return "POST".equalsIgnoreCase(request.getMethod())
-                && (request.getContextPath() + INGESTION_PATH).equals(request.getRequestURI())
+                && matchesIngestionPath(request, request.getRequestURI())
                 && contentType != null
                 && contentType.toLowerCase(Locale.ROOT).startsWith("application/json");
+    }
+
+    private boolean isIngestionPathParameterVariant(HttpServletRequest request) {
+        if (!"POST".equalsIgnoreCase(request.getMethod())) {
+            return false;
+        }
+
+        String requestUri = request.getRequestURI();
+        String pathWithoutParameters = removePathParameters(requestUri);
+        return !requestUri.equals(pathWithoutParameters)
+                && matchesIngestionPath(request, pathWithoutParameters);
+    }
+
+    private boolean matchesIngestionPath(HttpServletRequest request, String requestUri) {
+        // Match decoded segments like Spring MVC, rather than comparing the encoded wire URL.
+        return INGESTION_PATH.matches(
+                RequestPath.parse(requestUri, request.getContextPath()).pathWithinApplication());
+    }
+
+    private String removePathParameters(String requestUri) {
+        StringBuilder canonicalPath = new StringBuilder(requestUri.length());
+        boolean insidePathParameters = false;
+
+        for (int index = 0; index < requestUri.length(); index++) {
+            char character = requestUri.charAt(index);
+            if (character == '/') {
+                insidePathParameters = false;
+                canonicalPath.append(character);
+            } else if (!insidePathParameters
+                    && (character == ';' || isEncodedSemicolon(requestUri, index))) {
+                insidePathParameters = true;
+                if (character != ';') {
+                    index += 2;
+                }
+            } else if (!insidePathParameters) {
+                canonicalPath.append(character);
+            }
+        }
+
+        return canonicalPath.toString();
+    }
+
+    private boolean isEncodedSemicolon(String value, int index) {
+        return index + 2 < value.length()
+                && value.charAt(index) == '%'
+                && value.charAt(index + 1) == '3'
+                && (value.charAt(index + 2) == 'B' || value.charAt(index + 2) == 'b');
     }
 
     private void reject(HttpServletResponse response) throws IOException {
         response.sendError(
                 HttpStatus.PAYLOAD_TOO_LARGE.value(),
                 "Failure event request body exceeds the configured size limit");
+    }
+
+    private void rejectPathParameters(HttpServletResponse response) throws IOException {
+        response.sendError(
+                HttpStatus.BAD_REQUEST.value(),
+                "Path parameters are not supported for failure event ingestion");
     }
 
     private static final class BufferedRequest extends HttpServletRequestWrapper {

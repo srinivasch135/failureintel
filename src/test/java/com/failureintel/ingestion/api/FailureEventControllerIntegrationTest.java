@@ -10,10 +10,13 @@ import com.failureintel.ingestion.application.service.FailureEventIngestionServi
 import com.failureintel.ingestion.domain.normalization.NormalizationStatus;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
@@ -25,6 +28,13 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.utility.DockerImageName;
 
 import java.time.Instant;
+import java.io.ByteArrayInputStream;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.Map;
 import java.util.UUID;
 
@@ -59,6 +69,13 @@ class FailureEventControllerIntegrationTest {
 
     @Autowired
     private MockMvc mockMvc;
+
+    @LocalServerPort
+    private int port;
+
+    private final HttpClient httpClient = HttpClient.newBuilder()
+            .connectTimeout(Duration.ofSeconds(5))
+            .build();
 
     @Autowired
     private FailureEventIngestionService ingestionService;
@@ -268,6 +285,16 @@ class FailureEventControllerIntegrationTest {
     }
 
     @Test
+    void shouldRejectIngestionPathParametersWithoutWritingRows() throws Exception {
+        mockMvc.perform(post("/api/v1/failure-events;probe=1")
+                        .contentType(APPLICATION_JSON)
+                        .content(validRequestJson()))
+                .andExpect(status().isBadRequest());
+
+        assertEquals(0, failureEventRepository.count());
+    }
+
+    @Test
     void shouldAcceptJsonRequestAtConfiguredSizeLimit() throws Exception {
         String validRequest = validRequestJson();
         String requestAtLimit = validRequest + " ".repeat(4096 - validRequest.length());
@@ -296,6 +323,58 @@ class FailureEventControllerIntegrationTest {
                 "host", "payment-prod-01",
                 "region", "us-east-1"));
         return request;
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void shouldEnforceSizeLimitForEveryEncodedPathCharacterOverRealHttp(boolean chunked)
+            throws Exception {
+        String path = "/api/v1/failure-events";
+        byte[] oversizedBody = paddedJsonBody(4097);
+        for (int index = 0; index < path.length(); index++) {
+            if (path.charAt(index) == '/') {
+                continue;
+            }
+            String encodedPath = path.substring(0, index)
+                    + "%%%02x".formatted((int) path.charAt(index)) + path.substring(index + 1);
+            assertEquals(413, postOverHttp(encodedPath, oversizedBody, chunked), encodedPath);
+            assertEquals(0, failureEventRepository.count(), encodedPath);
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void shouldPreserveEncodedRouteByteBoundaryAndRejectCombinedPathParameters(boolean chunked)
+            throws Exception {
+        String encodedPath = "/%61pi/v%31/%66ailure%2devents";
+        assertEquals(202, postOverHttp(encodedPath, paddedJsonBody(4096), chunked));
+        assertEquals(1, failureEventRepository.count());
+
+        assertEquals(413, postOverHttp(encodedPath + "?probe=1", paddedJsonBody(4097), chunked));
+        for (String path : new String[] {
+                encodedPath + ";probe=1", encodedPath + "%3bprobe=1",
+                "/%61pi;tenant=one/v%31/%66ailure%2devents"}) {
+            assertEquals(400, postOverHttp(path, paddedJsonBody(4097), chunked), path);
+        }
+        assertEquals(1, failureEventRepository.count());
+    }
+
+    private byte[] paddedJsonBody(int sizeBytes) {
+        String json = validRequestJson().replace("Connection timeout after 5000ms", "Failure λ € 😀");
+        return (json + " ".repeat(sizeBytes - json.getBytes(StandardCharsets.UTF_8).length))
+                .getBytes(StandardCharsets.UTF_8);
+    }
+
+    private int postOverHttp(String path, byte[] body, boolean chunked) throws Exception {
+        HttpRequest.BodyPublisher publisher = chunked
+                ? HttpRequest.BodyPublishers.ofInputStream(() -> new ByteArrayInputStream(body))
+                : HttpRequest.BodyPublishers.ofByteArray(body);
+        HttpRequest request = HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + path))
+                .timeout(Duration.ofSeconds(15))
+                .header("Content-Type", "application/json;charset=UTF-8")
+                .POST(publisher)
+                .build();
+        return httpClient.send(request, HttpResponse.BodyHandlers.discarding()).statusCode();
     }
 
     private String validRequestJson() {
