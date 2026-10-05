@@ -7,6 +7,7 @@ import com.failureintel.infrastructure.persistence.failureevent.entity.Processin
 import com.failureintel.infrastructure.persistence.failureevent.mapper.FailureEventEntityMapper;
 import com.failureintel.infrastructure.persistence.failureevent.repository.FailureEventRepository;
 import com.failureintel.infrastructure.persistence.normalizedFailureEvent.repository.NormalizedFailureEventRepository;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -60,6 +61,8 @@ class FailureEventPipelineIntegrationTest {
         private NormalizedFailureEventRepository normalizedFailureEventRepository;
         @Autowired
         private JdbcTemplate jdbcTemplate;
+        @Autowired
+        private MeterRegistry meterRegistry;
 
         @AfterEach
         void cleanUpDB() {
@@ -193,6 +196,9 @@ class FailureEventPipelineIntegrationTest {
         void shouldReturnOneEventIdForConcurrentEquivalentRequests() throws Exception {
                 FailureEventIngestionRequest firstRequest = createValidRequest();
                 firstRequest.setIdempotencyKey("event-concurrent-001");
+                double acceptedBefore = meterRegistry.get("failureintel.events.raw.accepted").counter().count();
+                double captureFailuresBefore = meterRegistry.get("failureintel.events.capture.failures")
+                                .counter().count();
 
                 ExecutorService executor = Executors.newFixedThreadPool(2);
                 CountDownLatch ready = new CountDownLatch(2);
@@ -208,6 +214,10 @@ class FailureEventPipelineIntegrationTest {
 
                         assertEquals(firstEventId, secondEventId);
                         assertEquals(1, failureEventRepository.count());
+                        assertEquals(acceptedBefore + 1,
+                                        meterRegistry.get("failureintel.events.raw.accepted").counter().count());
+                        assertEquals(captureFailuresBefore,
+                                        meterRegistry.get("failureintel.events.capture.failures").counter().count());
                 } finally {
                         executor.shutdownNow();
                 }

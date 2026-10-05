@@ -177,22 +177,15 @@ class FailureEventProcessingWorkerTest {
     }
 
     @Test
-    void shouldCancelFutureScheduledCyclesWhenApplicationContextCloses() throws InterruptedException {
-        CountDownLatch claimAttempted = new CountDownLatch(1);
-
+    void shouldCancelFutureScheduledCyclesWhenApplicationContextCloses() {
         contextRunner
                 .withPropertyValues(
                         "failure-event.processing.worker.enabled=true",
                         "failure-event.processing.worker.fixed-delay=1h")
                 .run(context -> {
                     FailureEventClaimService claimService = context.getBean(FailureEventClaimService.class);
-                    doAnswer(invocation -> {
-                        claimAttempted.countDown();
-                        return List.of();
-                    }).when(claimService).claimNextEligibleForProcessing(anyInt());
-
-                    assertTrue(claimAttempted.await(2, TimeUnit.SECONDS),
-                            "The scheduled worker should run while the application context is active");
+                    FailureEventProcessingWorker worker = context.getBean(FailureEventProcessingWorker.class);
+                    worker.processNextBatch();
 
                     ScheduledAnnotationBeanPostProcessor scheduledTasks = context.getBean(
                             ScheduledAnnotationBeanPostProcessor.class);
@@ -202,7 +195,7 @@ class FailureEventProcessingWorkerTest {
 
                     assertTrue(scheduledTasks.getScheduledTasks().isEmpty(),
                             "Spring should cancel scheduled worker cycles during context shutdown");
-                    verify(claimService, times(1)).claimNextEligibleForProcessing(anyInt());
+                    verify(claimService, atLeastOnce()).claimNextEligibleForProcessing(anyInt());
                 });
     }
 

@@ -4,6 +4,7 @@ import com.failureintel.ingestion.api.dto.FailureEventIngestionRequest;
 import com.failureintel.ingestion.application.exception.DuplicateFailureEventException;
 import com.failureintel.ingestion.application.useCase.IngestFailureEventUseCase;
 import com.failureintel.ingestion.domain.model.RawFailureEvent;
+import com.failureintel.infrastructure.monitoring.metrics.FailureEventMetrics;
 import com.failureintel.infrastructure.persistence.failureevent.entity.FailureEventEntity;
 import com.failureintel.infrastructure.persistence.failureevent.mapper.FailureEventEntityMapper;
 import com.failureintel.infrastructure.persistence.failureevent.repository.FailureEventRepository;
@@ -28,14 +29,28 @@ public class FailureEventIngestionService implements IngestFailureEventUseCase {
         private static final String POSTGRES_UNIQUE_VIOLATION = "23505";
 
         private final FailureEventRepository failureEventRepository;
+        private final FailureEventMetrics failureEventMetrics;
 
-        public FailureEventIngestionService(FailureEventRepository failureEventRepository) {
+        public FailureEventIngestionService(
+                        FailureEventRepository failureEventRepository,
+                        FailureEventMetrics failureEventMetrics) {
                 this.failureEventRepository = failureEventRepository;
+                this.failureEventMetrics = failureEventMetrics;
         }
 
         @Override
         public String ingestFailureEvent(FailureEventIngestionRequest request) {
+                try {
+                        return captureFailureEvent(request);
+                } catch (DuplicateFailureEventException exception) {
+                        throw exception;
+                } catch (RuntimeException exception) {
+                        recordCaptureFailure(exception);
+                        throw exception;
+                }
+        }
 
+        private String captureFailureEvent(FailureEventIngestionRequest request) {
                 RawFailureEvent rawFailureEvent = mapRequestToRawFailureEvent(request);
                 String idempotencyKey = resolveIdempotencyKey(request);
                 String fingerprint = idempotencyKey == null
@@ -61,6 +76,7 @@ public class FailureEventIngestionService implements IngestFailureEventUseCase {
 
                 try {
                         FailureEventEntity savedEntity = failureEventRepository.saveAndFlush(entity);
+                        recordRawEventAccepted();
 
                         logger.info(
                                         "Persisted raw failure event for processing. eventId={} traceId={} idempotencyKeyPresent={} processingStatus={}",
@@ -82,6 +98,24 @@ public class FailureEventIngestionService implements IngestFailureEventUseCase {
                                         .findByIdempotencyKey(idempotencyKey)
                                         .orElseThrow(() -> exception);
                         return resolveExisting(existing, rawFailureEvent, fingerprint, request);
+                }
+        }
+
+        private void recordRawEventAccepted() {
+                try {
+                        failureEventMetrics.recordRawEventAccepted();
+                } catch (RuntimeException metricsFailure) {
+                        logger.warn("Unable to record raw failure-event acceptance metric", metricsFailure);
+                }
+        }
+
+        private void recordCaptureFailure(RuntimeException captureFailure) {
+                try {
+                        failureEventMetrics.recordCaptureFailure();
+                } catch (RuntimeException metricsFailure) {
+                        if (metricsFailure != captureFailure) {
+                                captureFailure.addSuppressed(metricsFailure);
+                        }
                 }
         }
 
