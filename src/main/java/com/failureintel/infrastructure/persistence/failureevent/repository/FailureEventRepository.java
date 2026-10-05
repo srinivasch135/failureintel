@@ -7,10 +7,22 @@ import org.springframework.data.jpa.repository.*;
 import org.springframework.data.repository.query.Param;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
+import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.*;
 
 public interface FailureEventRepository extends JpaRepository<FailureEventEntity, UUID> {
+        @Transactional(readOnly = true)
+        long countByProcessingStatus(ProcessingStatus processingStatus);
+
+        @Transactional(readOnly = true)
+        @Query(value = """
+                        SELECT EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - MIN(ingested_at)))
+                        FROM failure_event
+                        WHERE processing_status IN ('RECEIVED', 'PROCESSING', 'RETRYABLE')
+                        """, nativeQuery = true)
+        BigDecimal findOldestUnfinishedEventAgeSeconds();
+
         Optional<FailureEventEntity> findFirstByTraceIdOrderByIngestedAtDescEventIdDesc(String traceId);
 
         @Transactional(readOnly = true, propagation = Propagation.REQUIRES_NEW)

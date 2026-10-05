@@ -3,6 +3,7 @@ package com.failureintel.ingestion.application.service;
 import com.failureintel.infrastructure.persistence.failureevent.entity.ProcessingStatus;
 import com.failureintel.infrastructure.persistence.failureevent.repository.FailureEventRepository;
 import com.failureintel.infrastructure.persistence.normalizedFailureEvent.repository.NormalizedFailureEventRepository;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.slf4j.Logger;
@@ -10,6 +11,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.TestPropertySource;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.testcontainers.containers.PostgreSQLContainer;
@@ -19,9 +21,12 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.utility.DockerImageName;
 
 import java.util.UUID;
+import java.util.LinkedHashMap;
+import java.util.Map;
 
 import static com.failureintel.test.support.FailureEventTestFixtures.validRequest;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.verifyNoInteractions;
 
 @SpringBootTest
@@ -46,6 +51,12 @@ class FailureEventDurableCaptureIntegrationTest {
     @Autowired
     private FailureEventRepository failureEventRepository;
 
+    @Autowired
+    private MeterRegistry meterRegistry;
+
+    @Autowired
+    private JdbcTemplate jdbcTemplate;
+
     @MockitoBean
     private NormalizedFailureEventRepository normalizedFailureEventRepository;
 
@@ -62,5 +73,47 @@ class FailureEventDurableCaptureIntegrationTest {
         assertEquals(ProcessingStatus.RECEIVED, persisted.getProcessingStatus());
         assertEquals(1, failureEventRepository.count());
         verifyNoInteractions(normalizedFailureEventRepository);
+    }
+
+    @Test
+    void shouldExposeDatabaseBackedBacklogAndOldestAgeUsingIngestionTime() {
+        Map<ProcessingStatus, Integer> unfinishedAges = new LinkedHashMap<>();
+        unfinishedAges.put(ProcessingStatus.RECEIVED, 60);
+        unfinishedAges.put(ProcessingStatus.PROCESSING, 40);
+        unfinishedAges.put(ProcessingStatus.RETRYABLE, 20);
+        Map<ProcessingStatus, Integer> terminalAges = new LinkedHashMap<>();
+        terminalAges.put(ProcessingStatus.FAILED, 120);
+        terminalAges.put(ProcessingStatus.NORMALIZED, 140);
+        terminalAges.put(ProcessingStatus.QUEUED, 160);
+        terminalAges.put(ProcessingStatus.PROCESSED, 180);
+
+        unfinishedAges.forEach((status, ageSeconds) -> persistEventWithStatus(status, ageSeconds));
+        terminalAges.forEach((status, ageSeconds) -> persistEventWithStatus(status, ageSeconds));
+
+        assertEquals(1.0, meterRegistry.get("failureintel.events.backlog")
+                .tag("status", "received").gauge().value());
+        assertEquals(1.0, meterRegistry.get("failureintel.events.backlog")
+                .tag("status", "processing").gauge().value());
+        assertEquals(1.0, meterRegistry.get("failureintel.events.backlog")
+                .tag("status", "retryable").gauge().value());
+
+        double oldestAgeSeconds = meterRegistry.get("failureintel.events.backlog.oldest.age").gauge().value();
+        assertTrue(oldestAgeSeconds >= 59.0 && oldestAgeSeconds <= 62.0,
+                "age should derive from the oldest unfinished ingested_at timestamp");
+    }
+
+    private void persistEventWithStatus(ProcessingStatus status, int ingestedAgeSeconds) {
+        String eventId = ingestionService.ingestFailureEvent(
+                validRequest("trace-metrics-" + status.name().toLowerCase()));
+        UUID id = UUID.fromString(eventId);
+        jdbcTemplate.update("""
+                UPDATE failure_event
+                SET processing_status = ?,
+                    ingested_at = CURRENT_TIMESTAMP - (? * INTERVAL '1 second'),
+                    occurred_at = CURRENT_TIMESTAMP - (? * INTERVAL '1 second')
+                WHERE event_id = ?
+                """, status.name(), ingestedAgeSeconds,
+                status == ProcessingStatus.RECEIVED ? 3600 : ingestedAgeSeconds,
+                id);
     }
 }
