@@ -1,11 +1,16 @@
 package com.failureintel.ingestion.application.service;
 
+import com.failureintel.infrastructure.monitoring.metrics.FailureEventMetrics;
 import com.failureintel.infrastructure.persistence.failureevent.entity.FailureEventEntity;
 import com.failureintel.infrastructure.persistence.failureevent.entity.ProcessingStatus;
 import com.failureintel.infrastructure.persistence.failureevent.repository.FailureEventRepository;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.time.Instant;
 import java.util.ArrayList;
@@ -14,14 +19,19 @@ import java.util.List;
 @Service
 public class FailureEventClaimService {
 
+    private static final Logger LOGGER = LoggerFactory.getLogger(FailureEventClaimService.class);
+
     private final FailureEventRepository failureEventRepository;
     private final FailureEventRetryPolicy retryPolicy;
+    private final FailureEventMetrics failureEventMetrics;
 
     public FailureEventClaimService(
             FailureEventRepository failureEventRepository,
-            FailureEventRetryPolicy retryPolicy) {
+            FailureEventRetryPolicy retryPolicy,
+            FailureEventMetrics failureEventMetrics) {
         this.failureEventRepository = failureEventRepository;
         this.retryPolicy = retryPolicy;
+        this.failureEventMetrics = failureEventMetrics;
     }
 
     /**
@@ -46,6 +56,8 @@ public class FailureEventClaimService {
             if (event.getProcessingStatus() == ProcessingStatus.RETRYABLE
                     && event.getAttemptCount() >= maxAttempts) {
                 event.markRetryExhausted(event.getFailureCode(), event.getFailureReason());
+                recordAfterCommit(() -> failureEventMetrics.recordFailed(
+                        FailureEventMetrics.FailureSource.CLAIM));
                 continue;
             }
 
@@ -54,5 +66,21 @@ public class FailureEventClaimService {
         }
 
         return List.copyOf(claims);
+    }
+
+    private void recordAfterCommit(Runnable metricRecording) {
+        if (!TransactionSynchronizationManager.isSynchronizationActive()) {
+            return;
+        }
+        try {
+            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                @Override
+                public void afterCommit() {
+                    metricRecording.run();
+                }
+            });
+        } catch (RuntimeException metricsFailure) {
+            LOGGER.warn("Unable to register committed claim failure metric", metricsFailure);
+        }
     }
 }

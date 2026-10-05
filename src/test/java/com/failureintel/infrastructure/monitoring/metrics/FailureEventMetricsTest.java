@@ -2,6 +2,7 @@ package com.failureintel.infrastructure.monitoring.metrics;
 
 import com.failureintel.infrastructure.persistence.failureevent.entity.ProcessingStatus;
 import com.failureintel.infrastructure.persistence.failureevent.repository.FailureEventRepository;
+import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.Meter;
 import io.micrometer.core.instrument.Tag;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
@@ -13,8 +14,10 @@ import java.math.BigDecimal;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -143,5 +146,37 @@ class FailureEventMetricsTest {
         verify(failureEventRepository).countByProcessingStatus(ProcessingStatus.PROCESSING);
         verify(failureEventRepository).countByProcessingStatus(ProcessingStatus.RETRYABLE);
         verify(failureEventRepository).findOldestUnfinishedEventAgeSeconds();
+    }
+
+    @Test
+    void shouldContainRegistryFailuresWhenRecordingMetrics() {
+        FailingNormalizedCounterRegistry failingRegistry = new FailingNormalizedCounterRegistry();
+        try {
+            FailureEventMetrics metrics = new FailureEventMetrics(failingRegistry, failureEventRepository);
+
+            assertDoesNotThrow(metrics::recordNormalized);
+            assertDoesNotThrow(() -> metrics.recordFailed(FailureEventMetrics.FailureSource.PROCESSING));
+        } finally {
+            failingRegistry.close();
+        }
+    }
+
+    private static final class FailingNormalizedCounterRegistry extends SimpleMeterRegistry {
+
+        private final Counter failingCounter = mock(Counter.class);
+
+        private FailingNormalizedCounterRegistry() {
+            doThrow(new IllegalStateException("test registry failure"))
+                    .when(failingCounter)
+                    .increment();
+        }
+
+        @Override
+        protected Counter newCounter(Meter.Id id) {
+            if ((PREFIX + "normalized").equals(id.getName())) {
+                return failingCounter;
+            }
+            return super.newCounter(id);
+        }
     }
 }

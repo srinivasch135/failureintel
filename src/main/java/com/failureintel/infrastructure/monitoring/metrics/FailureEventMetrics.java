@@ -6,6 +6,8 @@ import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Timer;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
 import java.util.EnumMap;
@@ -15,6 +17,8 @@ import java.util.OptionalDouble;
 
 @Component
 public class FailureEventMetrics {
+
+    private static final Logger LOGGER = LoggerFactory.getLogger(FailureEventMetrics.class);
 
     private static final String PREFIX = "failureintel.events.";
     private static final String RAW_ACCEPTED = PREFIX + "raw.accepted";
@@ -94,35 +98,54 @@ public class FailureEventMetrics {
     }
 
     public void recordRawEventAccepted() {
-        rawAccepted.increment();
+        recordSafely("raw acceptance", rawAccepted::increment);
     }
 
     public void recordCaptureFailure() {
-        captureFailures.increment();
+        recordSafely("capture failure", captureFailures::increment);
     }
 
     public Timer.Sample startProcessingTimer() {
-        return Timer.start(meterRegistry);
+        try {
+            return Timer.start(meterRegistry);
+        } catch (RuntimeException metricsFailure) {
+            LOGGER.warn("Unable to start failure-event processing timer", metricsFailure);
+            return null;
+        }
     }
 
     public void stopProcessingTimer(Timer.Sample sample) {
-        Objects.requireNonNull(sample, "sample must not be null").stop(processingDuration);
+        if (sample == null) {
+            return;
+        }
+        recordSafely("processing duration", () -> sample.stop(processingDuration));
     }
 
     public void recordNormalized() {
-        normalized.increment();
+        recordSafely("normalized outcome", normalized::increment);
     }
 
     public void recordRetryScheduled(RetrySource source) {
-        retryScheduled.get(Objects.requireNonNull(source, "source must not be null")).increment();
+        Counter counter = retryScheduled.get(Objects.requireNonNull(source, "source must not be null"));
+        recordSafely("scheduled retry", counter::increment);
     }
 
     public void recordFailed(FailureSource source) {
-        failed.get(Objects.requireNonNull(source, "source must not be null")).increment();
+        Counter counter = failed.get(Objects.requireNonNull(source, "source must not be null"));
+        recordSafely("terminal failure", counter::increment);
     }
 
     public void recordLeaseRecovered(LeaseRecoveryResult result) {
-        leaseRecovered.get(Objects.requireNonNull(result, "result must not be null")).increment();
+        Counter counter = leaseRecovered.get(Objects.requireNonNull(result, "result must not be null"));
+        recordSafely("lease recovery", counter::increment);
+    }
+
+    private void recordSafely(String operation, Runnable recording) {
+        try {
+            recording.run();
+        } catch (RuntimeException metricsFailure) {
+            LOGGER.warn("Unable to record failure-event {} metric", operation, metricsFailure);
+        }
     }
 
     public OptionalDouble normalizationSuccessRatio() {

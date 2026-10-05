@@ -8,6 +8,7 @@ import com.failureintel.ingestion.domain.normalization.FailureEventNormalizer;
 import com.failureintel.ingestion.domain.normalization.NormalizationStatus;
 import com.failureintel.infrastructure.persistence.normalizedFailureEvent.entity.NormalizedFailureEventEntity;
 import com.failureintel.infrastructure.persistence.normalizedFailureEvent.repository.NormalizedFailureEventRepository;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.slf4j.Logger;
@@ -94,6 +95,9 @@ class FailureEventNormalizationProcessorRollbackIntegrationTest {
     @Autowired
     private JdbcTemplate jdbcTemplate;
 
+    @Autowired
+    private MeterRegistry meterRegistry;
+
     @MockitoBean
     private FailureEventNormalizer failureEventNormalizer;
 
@@ -104,6 +108,7 @@ class FailureEventNormalizationProcessorRollbackIntegrationTest {
 
     @Test
     void shouldRollBackRawNormalizationStatusWhenNormalizedPersistenceFails() {
+        double normalizedBefore = counter("normalized");
         when(failureEventNormalizer.normalize(any()))
                 .thenReturn(normalizedEventExceedingDatabaseColumnLength());
 
@@ -120,10 +125,14 @@ class FailureEventNormalizationProcessorRollbackIntegrationTest {
                 ProcessingStatus.PROCESSING,
                 failureEventRepository.findById(eventId).orElseThrow().getProcessingStatus());
         assertFalse(normalizedFailureEventRepository.existsById(eventId));
+        assertEquals(normalizedBefore, counter("normalized"));
     }
 
     @Test
     void shouldRecordRetryableAfterNormalizedWriteTransactionRollsBack() {
+        double retriesBefore = counter("retry.scheduled", "source", "processing");
+        double processingAttemptsBefore = processingTimerCount();
+        double normalizedBefore = counter("normalized");
         when(failureEventNormalizer.normalize(any()))
                 .thenReturn(normalizedEventExceedingDatabaseColumnLength());
 
@@ -146,10 +155,16 @@ class FailureEventNormalizationProcessorRollbackIntegrationTest {
         assertNotNull(persistedRawEvent.getNextAttemptAt());
         assertTrue(persistedRawEvent.getNextAttemptAt().isAfter(Instant.now()));
         assertFalse(normalizedFailureEventRepository.existsById(eventId));
+        assertEquals(retriesBefore + 1, counter("retry.scheduled", "source", "processing"));
+        assertEquals(processingAttemptsBefore + 1, processingTimerCount());
+        assertEquals(normalizedBefore, counter("normalized"));
     }
 
     @Test
     void shouldClaimDueRetryAndCommitNormalizationAndRawStatusTogether() {
+        double retriesBefore = counter("retry.scheduled", "source", "processing");
+        double normalizedBefore = counter("normalized");
+        double processingAttemptsBefore = processingTimerCount();
         when(failureEventNormalizer.normalize(any()))
                 .thenReturn(
                         normalizedEventExceedingDatabaseColumnLength(),
@@ -192,10 +207,15 @@ class FailureEventNormalizationProcessorRollbackIntegrationTest {
         assertNull(normalizedRawEvent.getFailureCode());
         assertNull(normalizedRawEvent.getNextAttemptAt());
         assertEquals(1, normalizedFailureEventRepository.count());
+        assertEquals(retriesBefore + 1, counter("retry.scheduled", "source", "processing"));
+        assertEquals(normalizedBefore + 1, counter("normalized"));
+        assertEquals(processingAttemptsBefore + 2, processingTimerCount());
     }
 
     @Test
     void shouldRecordRetryableWhenNormalizationTransactionFailsDuringCompletion() {
+        double normalizedBefore = counter("normalized");
+        double retriesBefore = counter("retry.scheduled", "source", "processing");
         when(failureEventNormalizer.normalize(any())).thenAnswer(invocation -> {
             TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
                 @Override
@@ -220,6 +240,8 @@ class FailureEventNormalizationProcessorRollbackIntegrationTest {
         assertEquals("NORMALIZED_WRITE_FAILURE", persistedRawEvent.getFailureCode());
         assertFalse(normalizedFailureEventRepository.existsById(eventId));
         assertNotNull(persistedRawEvent.getNextAttemptAt());
+        assertEquals(normalizedBefore, counter("normalized"));
+        assertEquals(retriesBefore + 1, counter("retry.scheduled", "source", "processing"));
     }
 
     @Test
@@ -354,5 +376,17 @@ class FailureEventNormalizationProcessorRollbackIntegrationTest {
                 Map.of("source", "test"),
                 Map.of(),
                 Map.of());
+    }
+
+    private double counter(String name, String... tags) {
+        var search = meterRegistry.get("failureintel.events." + name);
+        for (int i = 0; i < tags.length; i += 2) {
+            search = search.tag(tags[i], tags[i + 1]);
+        }
+        return search.counter().count();
+    }
+
+    private double processingTimerCount() {
+        return meterRegistry.get("failureintel.events.processing.duration").timer().count();
     }
 }

@@ -10,6 +10,7 @@ import com.failureintel.infrastructure.persistence.failureevent.entity.Processin
 import com.failureintel.infrastructure.persistence.failureevent.repository.FailureEventRepository;
 import com.failureintel.infrastructure.persistence.normalizedFailureEvent.entity.NormalizedFailureEventEntity;
 import com.failureintel.infrastructure.persistence.normalizedFailureEvent.repository.NormalizedFailureEventRepository;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -83,6 +84,9 @@ class FailureEventNormalizationProcessorIntegrationTest {
     @Autowired
     private JdbcTemplate jdbcTemplate;
 
+    @Autowired
+    private MeterRegistry meterRegistry;
+
     @MockitoBean
     private FailureEventParser failureEventParser;
 
@@ -104,6 +108,7 @@ class FailureEventNormalizationProcessorIntegrationTest {
 
     @Test
     void shouldPersistNormalizedEventAndMarkRawEventNormalized() {
+        double normalizedBefore = counter("normalized");
         ClaimedFailureEvent claim = ingestAndClaim("trace-normalization-001");
         UUID eventId = claim.eventId();
 
@@ -124,6 +129,7 @@ class FailureEventNormalizationProcessorIntegrationTest {
         assertEquals("prod", normalizedEvent.getNormalizedEnvironment());
         assertEquals("exception", normalizedEvent.getNormalizedEventType());
         assertEquals(1, normalizedFailureEventRepository.count());
+        assertEquals(normalizedBefore + 1, counter("normalized"));
     }
 
     @Test
@@ -149,6 +155,7 @@ class FailureEventNormalizationProcessorIntegrationTest {
 
     @Test
     void shouldPreserveRawEventAndMarkUnsupportedPayloadAsFailed() {
+        double failedBefore = counter("failed", "source", "processing");
         var request = validRequest("trace-normalization-unsupported-001");
         request.setRawPayload(java.util.Map.of());
         UUID eventId = UUID.fromString(ingestionService.ingestFailureEvent(request));
@@ -160,6 +167,7 @@ class FailureEventNormalizationProcessorIntegrationTest {
         assertEquals("UNSUPPORTED_PAYLOAD", rawEvent.getFailureCode());
         assertFalse(normalizedFailureEventRepository.existsById(eventId));
         assertEventIsNoLongerClaimable(eventId);
+        assertEquals(failedBefore + 1, counter("failed", "source", "processing"));
     }
 
     @Test
@@ -285,6 +293,10 @@ class FailureEventNormalizationProcessorIntegrationTest {
         ClaimedFailureEvent currentClaim = findClaim(eventId);
         assertEquals(firstClaim.attemptNumber() + 1, currentClaim.attemptNumber());
 
+        double processingAttemptsBeforeStaleSkip = processingTimerCount();
+        processingService.process(firstClaim);
+        assertEquals(processingAttemptsBeforeStaleSkip, processingTimerCount());
+
         assertThrows(
                 StaleFailureEventClaimException.class,
                 () -> processor.process(firstClaim));
@@ -311,5 +323,17 @@ class FailureEventNormalizationProcessorIntegrationTest {
     private void assertEventIsNoLongerClaimable(UUID eventId) {
         assertTrue(claimService.claimNextEligibleForProcessing(1).stream()
                 .noneMatch(claim -> claim.eventId().equals(eventId)));
+    }
+
+    private double counter(String name, String... tags) {
+        var search = meterRegistry.get("failureintel.events." + name);
+        for (int i = 0; i < tags.length; i += 2) {
+            search = search.tag(tags[i], tags[i + 1]);
+        }
+        return search.counter().count();
+    }
+
+    private double processingTimerCount() {
+        return meterRegistry.get("failureintel.events.processing.duration").timer().count();
     }
 }

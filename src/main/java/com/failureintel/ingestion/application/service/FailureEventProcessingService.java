@@ -1,6 +1,8 @@
 package com.failureintel.ingestion.application.service;
 
 import com.failureintel.ingestion.application.exception.StaleFailureEventClaimException;
+import com.failureintel.infrastructure.monitoring.metrics.FailureEventMetrics;
+import io.micrometer.core.instrument.Timer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -17,14 +19,17 @@ public class FailureEventProcessingService {
     private final FailureEventNormalizationProcessor normalizationProcessor;
     private final FailureEventRetryStateRecorder retryStateRecorder;
     private final FailureEventRetryPolicy retryPolicy;
+    private final FailureEventMetrics failureEventMetrics;
 
     public FailureEventProcessingService(
             FailureEventNormalizationProcessor normalizationProcessor,
             FailureEventRetryStateRecorder retryStateRecorder,
-            FailureEventRetryPolicy retryPolicy) {
+            FailureEventRetryPolicy retryPolicy,
+            FailureEventMetrics failureEventMetrics) {
         this.normalizationProcessor = normalizationProcessor;
         this.retryStateRecorder = retryStateRecorder;
         this.retryPolicy = retryPolicy;
+        this.failureEventMetrics = failureEventMetrics;
     }
 
     /**
@@ -32,9 +37,12 @@ public class FailureEventProcessingService {
      * transaction spans processing and retry-state recording.
      */
     public void process(ClaimedFailureEvent claim) {
+        Timer.Sample processingTimer = failureEventMetrics.startProcessingTimer();
+        boolean recordDuration = true;
         try {
             normalizationProcessor.process(claim);
         } catch (StaleFailureEventClaimException staleClaim) {
+            recordDuration = false;
             LOGGER.debug(
                     "Skipping stale failure-event claim: eventId={}, attempt={}",
                     claim.eventId(),
@@ -60,6 +68,10 @@ public class FailureEventProcessingService {
                         claim.eventId(),
                         claim.attemptNumber(),
                         failure.getCode());
+            }
+        } finally {
+            if (recordDuration) {
+                failureEventMetrics.stopProcessingTimer(processingTimer);
             }
         }
     }

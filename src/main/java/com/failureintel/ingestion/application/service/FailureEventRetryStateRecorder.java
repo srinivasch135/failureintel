@@ -1,12 +1,17 @@
 package com.failureintel.ingestion.application.service;
 
 import com.failureintel.ingestion.application.exception.FailureEventNotFoundException;
+import com.failureintel.infrastructure.monitoring.metrics.FailureEventMetrics;
 import com.failureintel.infrastructure.persistence.failureevent.entity.FailureEventEntity;
 import com.failureintel.infrastructure.persistence.failureevent.entity.ProcessingStatus;
 import com.failureintel.infrastructure.persistence.failureevent.repository.FailureEventRepository;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.time.Instant;
 import java.util.Objects;
@@ -16,10 +21,16 @@ import java.util.Optional;
 @Service
 public class FailureEventRetryStateRecorder {
 
-    private final FailureEventRepository failureEventRepository;
+    private static final Logger LOGGER = LoggerFactory.getLogger(FailureEventRetryStateRecorder.class);
 
-    public FailureEventRetryStateRecorder(FailureEventRepository failureEventRepository) {
+    private final FailureEventRepository failureEventRepository;
+    private final FailureEventMetrics failureEventMetrics;
+
+    public FailureEventRetryStateRecorder(
+            FailureEventRepository failureEventRepository,
+            FailureEventMetrics failureEventMetrics) {
         this.failureEventRepository = failureEventRepository;
+        this.failureEventMetrics = failureEventMetrics;
     }
 
     /**
@@ -55,6 +66,26 @@ public class FailureEventRetryStateRecorder {
         // save() participates in this service transaction; do not use the
         // repository's saveAndFlush(), which is explicitly REQUIRES_NEW.
         failureEventRepository.save(event);
+        Runnable metricRecording = nextAttemptAt.isPresent()
+                ? () -> failureEventMetrics.recordRetryScheduled(FailureEventMetrics.RetrySource.PROCESSING)
+                : () -> failureEventMetrics.recordFailed(FailureEventMetrics.FailureSource.PROCESSING);
+        recordAfterCommit(metricRecording);
         return true;
+    }
+
+    private void recordAfterCommit(Runnable metricRecording) {
+        if (!TransactionSynchronizationManager.isSynchronizationActive()) {
+            return;
+        }
+        try {
+            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                @Override
+                public void afterCommit() {
+                    metricRecording.run();
+                }
+            });
+        } catch (RuntimeException metricsFailure) {
+            LOGGER.warn("Unable to register committed retry outcome metric", metricsFailure);
+        }
     }
 }

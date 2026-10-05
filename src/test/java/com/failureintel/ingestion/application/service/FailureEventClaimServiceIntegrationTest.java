@@ -3,6 +3,7 @@ package com.failureintel.ingestion.application.service;
 import com.failureintel.infrastructure.persistence.failureevent.entity.FailureEventEntity;
 import com.failureintel.infrastructure.persistence.failureevent.entity.ProcessingStatus;
 import com.failureintel.infrastructure.persistence.failureevent.repository.FailureEventRepository;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.slf4j.Logger;
@@ -15,6 +16,8 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.TestPropertySource;
 import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
 import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.transaction.support.TransactionTemplate;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.containers.output.Slf4jLogConsumer;
@@ -97,6 +100,9 @@ class FailureEventClaimServiceIntegrationTest {
 
     @Autowired
     private PlatformTransactionManager transactionManager;
+
+    @Autowired
+    private MeterRegistry meterRegistry;
 
     @AfterEach
     void cleanUp() {
@@ -240,6 +246,8 @@ class FailureEventClaimServiceIntegrationTest {
 
     @Test
     void shouldAdvanceAttemptsAndExhaustExactlyAtConfiguredMaximum() {
+        double retriesBefore = counter("retry.scheduled", "source", "processing");
+        double processingFailuresBefore = counter("failed", "source", "processing");
         FailureEventEntity event = persistEvent(
                 "retry-limit-boundary",
                 ProcessingStatus.RECEIVED,
@@ -276,10 +284,14 @@ class FailureEventClaimServiceIntegrationTest {
         }
 
         assertTrue(claimService.claimNextEligibleForProcessing(1).isEmpty());
+        assertEquals(retriesBefore + retryPolicy.getMaxAttempts() - 1,
+                counter("retry.scheduled", "source", "processing"));
+        assertEquals(processingFailuresBefore + 1, counter("failed", "source", "processing"));
     }
 
     @Test
     void shouldTerminalizeRetryableRowAtLimitEvenWhenItsRetryTimeIsInTheFuture() {
+        double claimFailuresBefore = counter("failed", "source", "claim");
         FailureEventEntity event = persistRetryableEvent(
                 "retry-limit-config-change",
                 Instant.parse("2026-09-15T10:00:00Z"),
@@ -291,6 +303,7 @@ class FailureEventClaimServiceIntegrationTest {
                 event.getEventId());
 
         assertTrue(claimService.claimNextEligibleForProcessing(1).isEmpty());
+        assertEquals(claimFailuresBefore + 1, counter("failed", "source", "claim"));
 
         FailureEventEntity persisted = failureEventRepository.findById(event.getEventId()).orElseThrow();
         assertEquals(ProcessingStatus.FAILED, persisted.getProcessingStatus());
@@ -301,12 +314,46 @@ class FailureEventClaimServiceIntegrationTest {
     }
 
     @Test
+    void shouldNotCountClaimExhaustionWhenClaimTransactionRollsBack() {
+        FailureEventEntity event = persistRetryableEvent(
+                "claim-exhaustion-rollback",
+                Instant.parse("2026-09-15T10:00:00Z"),
+                Instant.parse("2999-01-01T00:00:00Z"));
+        jdbcTemplate.update(
+                "UPDATE failure_event SET attempt_count = ?, version = version + 1 WHERE event_id = ?",
+                retryPolicy.getMaxAttempts(),
+                event.getEventId());
+        double failuresBefore = counter("failed", "source", "claim");
+
+        doAnswer(invocation -> {
+            int maxAttempts = (int) invocation.callRealMethod();
+            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                @Override
+                public void beforeCommit(boolean readOnly) {
+                    throw new IllegalStateException("simulated claim commit failure");
+                }
+            });
+            return maxAttempts;
+        }).when(retryPolicySpy).getMaxAttempts();
+
+        assertThrows(IllegalStateException.class, () -> claimService.claimNextEligibleForProcessing(1));
+
+        assertEquals(failuresBefore, counter("failed", "source", "claim"));
+        assertEquals(ProcessingStatus.RETRYABLE,
+                failureEventRepository.findById(event.getEventId()).orElseThrow().getProcessingStatus());
+    }
+
+    @Test
     void shouldRecoverExpiredProcessingClaimAndAllowItToBeClaimedAgainAfterBackoff() {
+        double recoveriesBefore = counter("lease.recovered", "result", "retryable");
+        double recoveryRetriesBefore = counter("retry.scheduled", "source", "recovery");
         FailureEventEntity abandoned = persistProcessingEvent(
                 "abandoned-processing-claim",
                 Instant.now().minusSeconds(3600));
 
         recoveryService.recoverExpiredClaims(1);
+        assertEquals(recoveriesBefore + 1, counter("lease.recovered", "result", "retryable"));
+        assertEquals(recoveryRetriesBefore + 1, counter("retry.scheduled", "source", "recovery"));
         assertTrue(claimService.claimNextEligibleForProcessing(1).isEmpty(),
                 "An abandoned attempt should respect the normal retry backoff");
 
@@ -335,6 +382,8 @@ class FailureEventClaimServiceIntegrationTest {
 
     @Test
     void shouldFailAnExpiredProcessingClaimWhenItsAttemptLimitIsReached() {
+        double recoveriesBefore = counter("lease.recovered", "result", "failed");
+        double recoveryFailuresBefore = counter("failed", "source", "recovery");
         FailureEventEntity abandoned = persistProcessingEvent(
                 "abandoned-attempt-limit",
                 Instant.now().minusSeconds(3600));
@@ -345,6 +394,8 @@ class FailureEventClaimServiceIntegrationTest {
                 abandoned.getEventId());
 
         recoveryService.recoverExpiredClaims(1);
+        assertEquals(recoveriesBefore + 1, counter("lease.recovered", "result", "failed"));
+        assertEquals(recoveryFailuresBefore + 1, counter("failed", "source", "recovery"));
         assertTrue(claimService.claimNextEligibleForProcessing(1).isEmpty());
 
         FailureEventEntity recovered = failureEventRepository.findById(abandoned.getEventId()).orElseThrow();
@@ -668,6 +719,8 @@ class FailureEventClaimServiceIntegrationTest {
 
     @Test
     void shouldRollBackAllRecoveryTransitionsWhenRecoveryFailsBeforeCommit() {
+        double recoveredBefore = counter("lease.recovered", "result", "retryable");
+        double retriesBefore = counter("retry.scheduled", "source", "recovery");
         FailureEventEntity firstExpired = persistProcessingEvent(
                 "recovery-rollback-first",
                 Instant.now().minusSeconds(3600));
@@ -689,6 +742,8 @@ class FailureEventClaimServiceIntegrationTest {
         assertEquals(ProcessingStatus.PROCESSING, secondAfterRollback.getProcessingStatus());
         assertEquals(1, firstAfterRollback.getAttemptCount());
         assertEquals(1, secondAfterRollback.getAttemptCount());
+        assertEquals(recoveredBefore, counter("lease.recovered", "result", "retryable"));
+        assertEquals(retriesBefore, counter("retry.scheduled", "source", "recovery"));
 
         doReturn(Optional.of(Instant.now().plusSeconds(60)))
                 .when(retryPolicySpy)
@@ -699,6 +754,8 @@ class FailureEventClaimServiceIntegrationTest {
                 failureEventRepository.findById(firstExpired.getEventId()).orElseThrow().getProcessingStatus());
         assertEquals(ProcessingStatus.RETRYABLE,
                 failureEventRepository.findById(secondExpired.getEventId()).orElseThrow().getProcessingStatus());
+        assertEquals(recoveredBefore + 2, counter("lease.recovered", "result", "retryable"));
+        assertEquals(retriesBefore + 2, counter("retry.scheduled", "source", "recovery"));
     }
 
     @Test
@@ -739,10 +796,12 @@ class FailureEventClaimServiceIntegrationTest {
 
         ClaimedFailureEvent currentClaim = claimService.claimNextEligibleForProcessing(1).get(0);
         assertEquals(2, currentClaim.attemptNumber());
+        double retriesBeforeStaleRecord = counter("retry.scheduled", "source", "processing");
         assertFalse(retryStateRecorder.recordFailure(
                 oldClaim,
                 FailureEventRetryableFailure.DATABASE_UNAVAILABLE,
                 Optional.of(Instant.now().plusSeconds(60))));
+        assertEquals(retriesBeforeStaleRecord, counter("retry.scheduled", "source", "processing"));
 
         FailureEventEntity persisted = failureEventRepository.findById(event.getEventId()).orElseThrow();
         assertEquals(ProcessingStatus.PROCESSING, persisted.getProcessingStatus());
@@ -873,6 +932,14 @@ class FailureEventClaimServiceIntegrationTest {
     private void assertStatus(UUID eventId, ProcessingStatus expectedStatus) {
         assertEquals(expectedStatus,
                 failureEventRepository.findById(eventId).orElseThrow().getProcessingStatus());
+    }
+
+    private double counter(String name, String... tags) {
+        var search = meterRegistry.get("failureintel.events." + name);
+        for (int i = 0; i < tags.length; i += 2) {
+            search = search.tag(tags[i], tags[i + 1]);
+        }
+        return search.counter().count();
     }
 
     private boolean disjoint(Set<UUID> first, Set<UUID> second) {
