@@ -11,6 +11,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
 import java.util.EnumMap;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.OptionalDouble;
@@ -168,12 +169,24 @@ public class FailureEventMetrics {
     }
 
     private double backlogCount(ProcessingStatus status) {
-        return failureEventRepository.countByProcessingStatus(status);
+        try {
+            return failureEventRepository.countByProcessingStatus(status);
+        } catch (RuntimeException databaseFailure) {
+            LOGGER.warn("Unable to observe failure-event backlog count for status={} failureType={}",
+                    status.name().toLowerCase(Locale.ROOT), databaseFailure.getClass().getSimpleName());
+            return Double.NaN;
+        }
     }
 
     private double oldestBacklogAgeSeconds() {
-        var ageSeconds = failureEventRepository.findOldestUnfinishedEventAgeSeconds();
-        return ageSeconds == null ? Double.NaN : ageSeconds.doubleValue();
+        try {
+            var ageSeconds = failureEventRepository.findOldestUnfinishedEventAgeSeconds();
+            return ageSeconds == null ? 0.0 : ageSeconds.doubleValue();
+        } catch (RuntimeException databaseFailure) {
+            LOGGER.warn("Unable to observe age of oldest failure-event backlog; failureType={}",
+                    databaseFailure.getClass().getSimpleName());
+            return Double.NaN;
+        }
     }
 
     private double normalizationSuccessRatioValue() {

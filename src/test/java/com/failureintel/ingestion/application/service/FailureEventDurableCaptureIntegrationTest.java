@@ -9,6 +9,7 @@ import org.junit.jupiter.api.Test;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.ApplicationContext;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -26,6 +27,7 @@ import java.util.Map;
 
 import static com.failureintel.test.support.FailureEventTestFixtures.validRequest;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.verifyNoInteractions;
 
@@ -56,6 +58,9 @@ class FailureEventDurableCaptureIntegrationTest {
 
     @Autowired
     private JdbcTemplate jdbcTemplate;
+
+    @Autowired
+    private ApplicationContext applicationContext;
 
     @MockitoBean
     private NormalizedFailureEventRepository normalizedFailureEventRepository;
@@ -100,6 +105,33 @@ class FailureEventDurableCaptureIntegrationTest {
         double oldestAgeSeconds = meterRegistry.get("failureintel.events.backlog.oldest.age").gauge().value();
         assertTrue(oldestAgeSeconds >= 59.0 && oldestAgeSeconds <= 62.0,
                 "age should derive from the oldest unfinished ingested_at timestamp");
+
+        assertNull(meterRegistry.find("failureintel.events.backlog").tag("status", "failed").gauge(),
+                "only unfinished lifecycle states receive backlog gauges");
+        assertTrue(applicationContext.getBeansOfType(FailureEventProcessingWorker.class).isEmpty(),
+                "the worker is disabled in this test context");
+
+        // Gauges query PostgreSQL at observation time; a committed status change is visible on the next read.
+        jdbcTemplate.update("UPDATE failure_event SET processing_status = 'FAILED' " +
+                "WHERE processing_status = 'RECEIVED'");
+        assertEquals(0.0, meterRegistry.get("failureintel.events.backlog")
+                .tag("status", "received").gauge().value());
+        assertEquals(1.0, meterRegistry.get("failureintel.events.backlog")
+                .tag("status", "processing").gauge().value());
+        assertEquals(1.0, meterRegistry.get("failureintel.events.backlog")
+                .tag("status", "retryable").gauge().value());
+    }
+
+    @Test
+    void shouldReportZeroForAnAvailableDatabaseWithNoBacklog() {
+        assertEquals(0, failureEventRepository.count());
+        assertEquals(0.0, meterRegistry.get("failureintel.events.backlog")
+                .tag("status", "received").gauge().value());
+        assertEquals(0.0, meterRegistry.get("failureintel.events.backlog")
+                .tag("status", "processing").gauge().value());
+        assertEquals(0.0, meterRegistry.get("failureintel.events.backlog")
+                .tag("status", "retryable").gauge().value());
+        assertEquals(0.0, meterRegistry.get("failureintel.events.backlog.oldest.age").gauge().value());
     }
 
     private void persistEventWithStatus(ProcessingStatus status, int ingestedAgeSeconds) {
@@ -110,10 +142,12 @@ class FailureEventDurableCaptureIntegrationTest {
                 UPDATE failure_event
                 SET processing_status = ?,
                     ingested_at = CURRENT_TIMESTAMP - (? * INTERVAL '1 second'),
-                    occurred_at = CURRENT_TIMESTAMP - (? * INTERVAL '1 second')
+                    occurred_at = CURRENT_TIMESTAMP - (? * INTERVAL '1 second'),
+                    next_attempt_at = CASE WHEN ? = 'RETRYABLE'
+                        THEN CURRENT_TIMESTAMP + INTERVAL '1 day' ELSE NULL END
                 WHERE event_id = ?
                 """, status.name(), ingestedAgeSeconds,
-                status == ProcessingStatus.RECEIVED ? 3600 : ingestedAgeSeconds,
+                status == ProcessingStatus.RECEIVED ? 3600 : ingestedAgeSeconds, status.name(),
                 id);
     }
 }

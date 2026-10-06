@@ -149,6 +149,25 @@ class FailureEventMetricsTest {
     }
 
     @Test
+    void shouldDistinguishEmptyBacklogFromDatabaseFailure() {
+        when(failureEventRepository.countByProcessingStatus(ProcessingStatus.RECEIVED)).thenReturn(0L);
+        when(failureEventRepository.findOldestUnfinishedEventAgeSeconds()).thenReturn(null);
+
+        assertEquals(0.0, registry.get(PREFIX + "backlog")
+                .tag("status", "received").gauge().value());
+        assertEquals(0.0, registry.get(PREFIX + "backlog.oldest.age").gauge().value());
+
+        when(failureEventRepository.countByProcessingStatus(ProcessingStatus.PROCESSING))
+                .thenThrow(new IllegalStateException("database unavailable"));
+        when(failureEventRepository.findOldestUnfinishedEventAgeSeconds())
+                .thenThrow(new IllegalStateException("database unavailable"));
+
+        assertTrue(Double.isNaN(registry.get(PREFIX + "backlog")
+                .tag("status", "processing").gauge().value()));
+        assertTrue(Double.isNaN(registry.get(PREFIX + "backlog.oldest.age").gauge().value()));
+    }
+
+    @Test
     void shouldContainRegistryFailuresWhenRecordingMetrics() {
         FailingNormalizedCounterRegistry failingRegistry = new FailingNormalizedCounterRegistry();
         try {
