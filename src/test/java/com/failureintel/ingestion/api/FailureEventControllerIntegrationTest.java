@@ -240,6 +240,8 @@ class FailureEventControllerIntegrationTest {
                 .andExpect(jsonPath("$.attemptCount").value(0))
                 .andExpect(jsonPath("$.lastAttemptAt").doesNotExist())
                 .andExpect(jsonPath("$.nextAttemptAt").doesNotExist())
+                .andExpect(jsonPath("$.failureCode").doesNotExist())
+                .andExpect(jsonPath("$.failureReason").doesNotExist())
                 .andExpect(jsonPath("$.normalizedAvailable").value(false));
 
         mockMvc.perform(get("/api/v1/failure-events/{eventId}", processing.getEventId()))
@@ -248,6 +250,8 @@ class FailureEventControllerIntegrationTest {
                 .andExpect(jsonPath("$.attemptCount").value(1))
                 .andExpect(jsonPath("$.lastAttemptAt").value("2026-08-03T20:00:01Z"))
                 .andExpect(jsonPath("$.nextAttemptAt").doesNotExist())
+                .andExpect(jsonPath("$.failureCode").doesNotExist())
+                .andExpect(jsonPath("$.failureReason").doesNotExist())
                 .andExpect(jsonPath("$.normalizedAvailable").value(false));
 
         mockMvc.perform(get("/api/v1/failure-events/{eventId}", retryable.getEventId()))
@@ -257,7 +261,8 @@ class FailureEventControllerIntegrationTest {
                 .andExpect(jsonPath("$.nextAttemptAt").exists())
                 .andExpect(jsonPath("$.failureCode").value("DATABASE_TIMEOUT"))
                 .andExpect(jsonPath("$.failureReason").value(
-                        "Failure-event processing could not complete; another attempt is scheduled."));
+                        "Failure-event processing could not complete; another attempt is scheduled."))
+                .andExpect(jsonPath("$.normalizedAvailable").value(false));
 
         mockMvc.perform(get("/api/v1/failure-events/{eventId}", failed.getEventId()))
                 .andExpect(status().isOk())
@@ -265,15 +270,19 @@ class FailureEventControllerIntegrationTest {
                 .andExpect(jsonPath("$.attemptCount").value(1))
                 .andExpect(jsonPath("$.nextAttemptAt").doesNotExist())
                 .andExpect(jsonPath("$.failureCode").value("MALFORMED_EVENT"))
-                .andExpect(jsonPath("$.failureReason").value("The failure event could not be interpreted."));
+                .andExpect(jsonPath("$.failureReason").value("The failure event could not be interpreted."))
+                .andExpect(jsonPath("$.normalizedAvailable").value(false));
 
         mockMvc.perform(get("/api/v1/failure-events/{eventId}", normalized.getEventId()))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.processingStatus").value("NORMALIZED"))
                 .andExpect(jsonPath("$.attemptCount").value(1))
                 .andExpect(jsonPath("$.failureCode").doesNotExist())
+                .andExpect(jsonPath("$.failureReason").doesNotExist())
+                .andExpect(jsonPath("$.nextAttemptAt").doesNotExist())
                 .andExpect(jsonPath("$.normalizedAvailable").value(true))
-                .andExpect(jsonPath("$.normalizationStatus").value("FULLY_NORMALIZED"));
+                .andExpect(jsonPath("$.normalizationStatus").value("FULLY_NORMALIZED"))
+                .andExpect(jsonPath("$.normalizedAt").value("2026-08-03T20:00:02Z"));
     }
 
     @Test
@@ -342,6 +351,35 @@ class FailureEventControllerIntegrationTest {
             continueRead.countDown();
             executor.shutdownNow();
         }
+    }
+
+    @Test
+    void shouldExposeOperationalMetricsAndHealthThroughActuator() throws Exception {
+        ingestionService.ingestFailureEvent(validRequest());
+
+        mockMvc.perform(get("/actuator/metrics/failureintel.events.raw.accepted"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.name").value("failureintel.events.raw.accepted"))
+                .andExpect(jsonPath("$.measurements[0].statistic").value("COUNT"))
+                .andExpect(jsonPath("$.measurements[0].value").isNumber())
+                .andExpect(jsonPath("$.availableTags.length()").value(0));
+
+        mockMvc.perform(get("/actuator/metrics/failureintel.events.backlog"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.name").value("failureintel.events.backlog"))
+                .andExpect(jsonPath("$.availableTags.length()").value(1))
+                .andExpect(jsonPath("$.availableTags[0].tag").value("status"))
+                .andExpect(jsonPath("$.availableTags[0].values.length()").value(3));
+
+        mockMvc.perform(get("/actuator/metrics/failureintel.events.backlog")
+                        .param("tag", "status:received"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.measurements[0].statistic").value("VALUE"))
+                .andExpect(jsonPath("$.measurements[0].value").isNumber());
+
+        mockMvc.perform(get("/actuator/health"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("UP"));
     }
 
     @Test

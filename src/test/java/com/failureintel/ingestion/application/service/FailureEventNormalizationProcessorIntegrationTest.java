@@ -3,6 +3,7 @@ package com.failureintel.ingestion.application.service;
 import com.failureintel.ingestion.application.exception.StaleFailureEventClaimException;
 import com.failureintel.ingestion.domain.model.ParsedFailureEvent;
 import com.failureintel.ingestion.domain.model.RawFailureEvent;
+import com.failureintel.ingestion.domain.normalization.NormalizationStatus;
 import com.failureintel.ingestion.domain.parser.FailureEventParser;
 import com.failureintel.ingestion.domain.parser.GenericJsonFailureEventParser;
 import com.failureintel.infrastructure.persistence.failureevent.entity.FailureEventEntity;
@@ -129,6 +130,25 @@ class FailureEventNormalizationProcessorIntegrationTest {
         assertEquals("prod", normalizedEvent.getNormalizedEnvironment());
         assertEquals("exception", normalizedEvent.getNormalizedEventType());
         assertEquals(1, normalizedFailureEventRepository.count());
+        assertEquals(normalizedBefore + 1, counter("normalized"));
+    }
+
+    @Test
+    void shouldCountPartiallyNormalizedCommitAsNormalizationSuccess() {
+        double normalizedBefore = counter("normalized");
+        var request = validRequest("trace-normalization-partial-metric-001");
+        request.setEnvironment("sandbox");
+        request.setEventType("vendor_outage");
+        UUID eventId = UUID.fromString(ingestionService.ingestFailureEvent(request));
+
+        processingService.process(findClaim(eventId));
+
+        FailureEventEntity rawEvent = failureEventRepository.findById(eventId).orElseThrow();
+        NormalizedFailureEventEntity normalizedEvent = normalizedFailureEventRepository
+                .findById(eventId)
+                .orElseThrow();
+        assertEquals(ProcessingStatus.NORMALIZED, rawEvent.getProcessingStatus());
+        assertEquals(NormalizationStatus.PARTIALLY_NORMALIZED, normalizedEvent.getNormalizationStatus());
         assertEquals(normalizedBefore + 1, counter("normalized"));
     }
 
