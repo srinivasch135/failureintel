@@ -30,6 +30,7 @@ spring:
     enabled: true
     out-of-order: false
     validate-on-migrate: true
+    connect-retries: ${SPRING_FLYWAY_CONNECT_RETRIES:5}
 
 logging:
   level:
