@@ -15,19 +15,16 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
+import com.failureintel.test.support.PostgresTestContainer;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.test.context.DynamicPropertyRegistry;
+import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.context.TestPropertySource;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
-import org.testcontainers.containers.PostgreSQLContainer;
-import org.testcontainers.containers.output.Slf4jLogConsumer;
-import org.testcontainers.junit.jupiter.Container;
-import org.testcontainers.junit.jupiter.Testcontainers;
-import org.testcontainers.utility.DockerImageName;
 
 import java.sql.Timestamp;
 import java.time.Instant;
@@ -52,21 +49,16 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.when;
 
 @SpringBootTest
-@Testcontainers
 @TestPropertySource(properties = "spring.jpa.hibernate.ddl-auto=validate")
 class FailureEventNormalizationProcessorRollbackIntegrationTest {
 
     private static final Logger LOGGER =
             LoggerFactory.getLogger(FailureEventNormalizationProcessorRollbackIntegrationTest.class);
 
-    @Container
-    @ServiceConnection
-    static final PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>(
-            DockerImageName.parse("postgres:16-alpine"))
-            .withDatabaseName("failureintel_normalization_rollback_test")
-            .withUsername("testuser")
-            .withPassword("testpassword")
-            .withLogConsumer(new Slf4jLogConsumer(LOGGER));
+    @DynamicPropertySource
+    static void postgresProperties(DynamicPropertyRegistry registry) {
+        PostgresTestContainer.registerDatabase(registry, "failureintel_normalization_rollback_test");
+    }
 
     @Autowired
     private FailureEventIngestionService ingestionService;

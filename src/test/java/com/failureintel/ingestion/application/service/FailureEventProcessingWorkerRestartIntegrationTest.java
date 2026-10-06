@@ -5,16 +5,13 @@ import com.failureintel.infrastructure.persistence.failureevent.entity.FailureEv
 import com.failureintel.infrastructure.persistence.failureevent.entity.ProcessingStatus;
 import com.failureintel.infrastructure.persistence.failureevent.repository.FailureEventRepository;
 import com.failureintel.infrastructure.persistence.normalizedFailureEvent.repository.NormalizedFailureEventRepository;
+import com.failureintel.test.support.PostgresTestContainer;
 import org.awaitility.Awaitility;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.WebApplicationType;
 import org.springframework.boot.builder.SpringApplicationBuilder;
 import org.springframework.context.ConfigurableApplicationContext;
 import org.springframework.jdbc.core.JdbcTemplate;
-import org.testcontainers.containers.PostgreSQLContainer;
-import org.testcontainers.junit.jupiter.Container;
-import org.testcontainers.junit.jupiter.Testcontainers;
-import org.testcontainers.utility.DockerImageName;
 
 import java.sql.Timestamp;
 import java.time.Duration;
@@ -27,15 +24,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-@Testcontainers
 class FailureEventProcessingWorkerRestartIntegrationTest {
-
-    @Container
-    static final PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>(
-            DockerImageName.parse("postgres:16-alpine"))
-            .withDatabaseName("failureintel_worker_restart_test")
-            .withUsername("testuser")
-            .withPassword("testpassword");
 
     @Test
     void shouldResumeReceivedAndAbandonedProcessingEventsAfterApplicationContextRestart() {
@@ -121,9 +110,10 @@ class FailureEventProcessingWorkerRestartIntegrationTest {
                 .web(WebApplicationType.NONE)
                 .registerShutdownHook(false)
                 .run(
-                        "--spring.datasource.url=" + postgres.getJdbcUrl(),
-                        "--spring.datasource.username=" + postgres.getUsername(),
-                        "--spring.datasource.password=" + postgres.getPassword(),
+                        "--spring.datasource.url=" + PostgresTestContainer.jdbcUrl(
+                                "failureintel_worker_restart_test"),
+                        "--spring.datasource.username=" + PostgresTestContainer.username(),
+                        "--spring.datasource.password=" + PostgresTestContainer.password(),
                         "--spring.jpa.hibernate.ddl-auto=validate",
                         "--failure-event.processing.worker.enabled=" + workerEnabled,
                         "--failure-event.processing.worker.fixed-delay=100ms",

@@ -11,11 +11,9 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
-import org.testcontainers.containers.PostgreSQLContainer;
-import org.testcontainers.junit.jupiter.Container;
-import org.testcontainers.junit.jupiter.Testcontainers;
-import org.testcontainers.utility.DockerImageName;
+import com.failureintel.test.support.PostgresTestContainer;
+import org.springframework.test.context.DynamicPropertyRegistry;
+import org.springframework.test.context.DynamicPropertySource;
 
 import java.time.Instant;
 import java.util.Map;
@@ -26,16 +24,12 @@ import static com.failureintel.test.support.FailureEventTestFixtures.OCCURRED_AT
 import static com.failureintel.test.support.FailureEventTestFixtures.rawEvent;
 
 @SpringBootTest
-@Testcontainers
 class FailureEventIngestionServiceIntegrationTest {
 
-    @Container
-    @ServiceConnection
-    static final PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>(
-            DockerImageName.parse("postgres:16-alpine"))
-            .withDatabaseName("failureintel_ingestion_test")
-            .withUsername("testuser")
-            .withPassword("testpassword");
+    @DynamicPropertySource
+    static void postgresProperties(DynamicPropertyRegistry registry) {
+        PostgresTestContainer.registerDatabase(registry, "failureintel_ingestion_test");
+    }
 
     @Autowired
     private FailureEventIngestionService ingestionService;

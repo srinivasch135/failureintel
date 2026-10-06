@@ -10,20 +10,17 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
+import com.failureintel.test.support.PostgresTestContainer;
 import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.test.context.DynamicPropertyRegistry;
+import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.context.TestPropertySource;
 import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.transaction.support.TransactionTemplate;
-import org.testcontainers.containers.PostgreSQLContainer;
-import org.testcontainers.containers.output.Slf4jLogConsumer;
-import org.testcontainers.junit.jupiter.Container;
-import org.testcontainers.junit.jupiter.Testcontainers;
-import org.testcontainers.utility.DockerImageName;
 
 import java.sql.Timestamp;
 import java.time.Duration;
@@ -55,7 +52,6 @@ import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
 
 @SpringBootTest
-@Testcontainers
 @TestPropertySource(properties = {
         "spring.jpa.hibernate.ddl-auto=validate",
         "failure-event.processing.retry.max-attempts=5"
@@ -65,14 +61,10 @@ class FailureEventClaimServiceIntegrationTest {
     private static final Logger LOGGER = LoggerFactory.getLogger(FailureEventClaimServiceIntegrationTest.class);
     private static final Instant ELIGIBLE_RETRY_AT = Instant.parse("2026-09-15T12:00:00Z");
 
-    @Container
-    @ServiceConnection
-    static final PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>(
-            DockerImageName.parse("postgres:16-alpine"))
-            .withDatabaseName("failureintel_claim_test")
-            .withUsername("testuser")
-            .withPassword("testpassword")
-            .withLogConsumer(new Slf4jLogConsumer(LOGGER));
+    @DynamicPropertySource
+    static void postgresProperties(DynamicPropertyRegistry registry) {
+        PostgresTestContainer.registerDatabase(registry, "failureintel_claim_test");
+    }
 
     @Autowired
     private FailureEventClaimService claimService;

@@ -11,15 +11,12 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.ApplicationContext;
 import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
+import com.failureintel.test.support.PostgresTestContainer;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.test.context.DynamicPropertyRegistry;
+import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.context.TestPropertySource;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
-import org.testcontainers.containers.PostgreSQLContainer;
-import org.testcontainers.containers.output.Slf4jLogConsumer;
-import org.testcontainers.junit.jupiter.Container;
-import org.testcontainers.junit.jupiter.Testcontainers;
-import org.testcontainers.utility.DockerImageName;
 
 import java.util.UUID;
 import java.util.LinkedHashMap;
@@ -32,20 +29,15 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.verifyNoInteractions;
 
 @SpringBootTest
-@Testcontainers
 @TestPropertySource(properties = "spring.jpa.hibernate.ddl-auto=validate")
 class FailureEventDurableCaptureIntegrationTest {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(FailureEventDurableCaptureIntegrationTest.class);
 
-    @Container
-    @ServiceConnection
-    static final PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>(
-            DockerImageName.parse("postgres:16-alpine"))
-            .withDatabaseName("failureintel_durable_capture_test")
-            .withUsername("testuser")
-            .withPassword("testpassword")
-            .withLogConsumer(new Slf4jLogConsumer(LOGGER));
+    @DynamicPropertySource
+    static void postgresProperties(DynamicPropertyRegistry registry) {
+        PostgresTestContainer.registerDatabase(registry, "failureintel_durable_capture_test");
+    }
 
     @Autowired
     private FailureEventIngestionService ingestionService;

@@ -12,15 +12,12 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
+import com.failureintel.test.support.PostgresTestContainer;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.test.context.TestPropertySource;
-import org.testcontainers.utility.DockerImageName;
-import org.testcontainers.containers.PostgreSQLContainer;
-import org.testcontainers.junit.jupiter.Container;
-import org.testcontainers.junit.jupiter.Testcontainers;
-import org.testcontainers.containers.output.Slf4jLogConsumer;
+import org.springframework.test.context.DynamicPropertyRegistry;
+import org.springframework.test.context.DynamicPropertySource;
 import org.slf4j.LoggerFactory;
 import org.slf4j.Logger;
 
@@ -37,21 +34,16 @@ import java.util.concurrent.Future;
 import static org.junit.jupiter.api.Assertions.*;
 
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
-@Testcontainers
 @TestPropertySource(properties = {
                 "spring.jpa.hibernate.ddl-auto=validate"
 })
 class FailureEventPipelineIntegrationTest {
         private static final Logger LOGGER = LoggerFactory.getLogger(FailureEventPipelineIntegrationTest.class);
 
-        @Container
-        @ServiceConnection
-        static final PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>(
-                        DockerImageName.parse("postgres:16-alpine"))
-                        .withDatabaseName("failureintel_pipeline_test")
-                        .withUsername("testuser")
-                        .withPassword("testpassword")
-                        .withLogConsumer(new Slf4jLogConsumer(LOGGER));
+        @DynamicPropertySource
+        static void postgresProperties(DynamicPropertyRegistry registry) {
+                PostgresTestContainer.registerDatabase(registry, "failureintel_pipeline_test");
+        }
 
         @Autowired
         private FailureEventIngestionService ingestionService;
