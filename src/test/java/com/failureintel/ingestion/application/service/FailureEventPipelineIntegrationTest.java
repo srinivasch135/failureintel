@@ -1,7 +1,12 @@
 package com.failureintel.ingestion.application.service;
 
 import com.failureintel.ingestion.api.dto.FailureEventIngestionRequest;
+import com.failureintel.ingestion.application.config.FailureEventWorkerExecutorConfiguration;
+import com.failureintel.ingestion.application.config.FailureEventWorkerProperties;
 import com.failureintel.ingestion.application.exception.DuplicateFailureEventException;
+import com.failureintel.ingestion.domain.model.NormalizedFailureEvent;
+import com.failureintel.ingestion.domain.model.ParsedFailureEvent;
+import com.failureintel.ingestion.domain.normalization.FailureEventNormalizer;
 import com.failureintel.infrastructure.persistence.failureevent.entity.FailureEventEntity;
 import com.failureintel.infrastructure.persistence.failureevent.entity.ProcessingStatus;
 import com.failureintel.infrastructure.persistence.failureevent.mapper.FailureEventEntityMapper;
@@ -18,6 +23,8 @@ import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.test.context.TestPropertySource;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
+import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
+import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 import org.slf4j.LoggerFactory;
 import org.slf4j.Logger;
 
@@ -31,11 +38,16 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doAnswer;
 import static org.junit.jupiter.api.Assertions.*;
 
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @TestPropertySource(properties = {
-                "spring.jpa.hibernate.ddl-auto=validate"
+                "spring.jpa.hibernate.ddl-auto=validate",
+                "failure-event.processing.worker.enabled=false",
+                "failure-event.processing.worker.batch-size=3",
+                "failure-event.processing.worker.concurrency=3"
 })
 class FailureEventPipelineIntegrationTest {
         private static final Logger LOGGER = LoggerFactory.getLogger(FailureEventPipelineIntegrationTest.class);
@@ -55,6 +67,17 @@ class FailureEventPipelineIntegrationTest {
         private JdbcTemplate jdbcTemplate;
         @Autowired
         private MeterRegistry meterRegistry;
+        @Autowired
+        private FailureEventClaimService claimService;
+        @Autowired
+        private FailureEventProcessingService processingService;
+        @Autowired
+        private FailureEventRecoveryService recoveryService;
+        @Autowired
+        private FailureEventWorkerProperties workerProperties;
+
+        @MockitoSpyBean
+        private FailureEventNormalizer failureEventNormalizer;
 
         @AfterEach
         void cleanUpDB() {
@@ -133,6 +156,68 @@ class FailureEventPipelineIntegrationTest {
                 assertFalse(normalizedFailureEventRepository.existsById(eventId));
                 assertEquals(1, failureEventRepository.count());
                 assertEquals(0, normalizedFailureEventRepository.count());
+        }
+
+        @Test
+        void shouldIsolateBatchFailures() {
+                FailureEventIngestionRequest requestA = requestWithTraceId("trace-batch-a");
+                FailureEventIngestionRequest requestB = requestWithTraceId("trace-batch-b");
+                FailureEventIngestionRequest requestC = requestWithTraceId("trace-batch-c");
+                UUID eventA = toRepositoryId(ingestionService.ingestFailureEvent(requestA));
+                UUID eventB = toRepositoryId(ingestionService.ingestFailureEvent(requestB));
+                UUID eventC = toRepositoryId(ingestionService.ingestFailureEvent(requestC));
+
+                doAnswer(invocation -> {
+                        ParsedFailureEvent parsed = invocation.getArgument(0);
+                        NormalizedFailureEvent normalized = (NormalizedFailureEvent) invocation.callRealMethod();
+                        if (!"trace-batch-b".equals(parsed.getTraceId())) {
+                                return normalized;
+                        }
+                        return withOversizedServiceName(normalized);
+                }).when(failureEventNormalizer).normalize(any());
+
+                ThreadPoolTaskExecutor executor = new FailureEventWorkerExecutorConfiguration()
+                                .failureEventNormalizationExecutor(workerProperties);
+                executor.afterPropertiesSet();
+                try {
+                        FailureEventProcessingWorker worker = new FailureEventProcessingWorker(
+                                        recoveryService,
+                                        claimService,
+                                        processingService,
+                                        workerProperties,
+                                        executor);
+                        worker.processNextBatch();
+                } finally {
+                        executor.destroy();
+                }
+
+                FailureEventEntity persistedA = failureEventRepository.findById(eventA).orElseThrow();
+                FailureEventEntity persistedB = failureEventRepository.findById(eventB).orElseThrow();
+                FailureEventEntity persistedC = failureEventRepository.findById(eventC).orElseThrow();
+
+                assertEquals(ProcessingStatus.NORMALIZED, persistedA.getProcessingStatus());
+                assertEquals(1, normalizedCount(eventA));
+                assertEquals("payment-service", normalizedFailureEventRepository.findById(eventA)
+                                .orElseThrow().getNormalizedServiceName());
+
+                assertEquals(ProcessingStatus.RETRYABLE, persistedB.getProcessingStatus());
+                assertEquals("NORMALIZED_WRITE_FAILURE", persistedB.getFailureCode());
+                assertEquals("Normalized failure event could not be persisted", persistedB.getFailureReason());
+                assertEquals(1, persistedB.getAttemptCount());
+                assertNull(persistedB.getProcessingStartedAt());
+                assertNotNull(persistedB.getLastAttemptAt());
+                assertNotNull(persistedB.getNextAttemptAt());
+                assertTrue(persistedB.getNextAttemptAt().isAfter(Instant.now()));
+                assertEquals(0, normalizedCount(eventB));
+
+                assertEquals(ProcessingStatus.NORMALIZED, persistedC.getProcessingStatus());
+                assertEquals(1, normalizedCount(eventC));
+                assertEquals("payment-service", normalizedFailureEventRepository.findById(eventC)
+                                .orElseThrow().getNormalizedServiceName());
+
+                assertTrue(failureEventRepository.existsById(eventA));
+                assertTrue(failureEventRepository.existsById(eventB));
+                assertTrue(failureEventRepository.existsById(eventC));
         }
 
         @Test
@@ -284,6 +369,38 @@ class FailureEventPipelineIntegrationTest {
                                 "host", "payment-prod-01",
                                 "region", "us-east-1"));
                 return request;
+        }
+
+        private FailureEventIngestionRequest requestWithTraceId(String traceId) {
+                FailureEventIngestionRequest request = createValidRequest();
+                request.setTraceId(traceId);
+                return request;
+        }
+
+        private NormalizedFailureEvent withOversizedServiceName(NormalizedFailureEvent normalized) {
+                return new NormalizedFailureEvent(
+                                normalized.getEventId(),
+                                "x".repeat(256),
+                                normalized.getEnvironment(),
+                                normalized.getEventType(),
+                                normalized.getErrorType(),
+                                normalized.getErrorMessage(),
+                                normalized.getDependencyTarget(),
+                                normalized.getTraceId(),
+                                normalized.getSeverity(),
+                                normalized.getOccurredAt(),
+                                normalized.getNormalizedAt(),
+                                normalized.getNormalizationStatus(),
+                                normalized.getNormalizedPayload(),
+                                normalized.getSourceMetadata(),
+                                normalized.getNormalizationMetadata());
+        }
+
+        private int normalizedCount(UUID eventId) {
+                return jdbcTemplate.queryForObject(
+                                "SELECT COUNT(*) FROM normalized_failure_event WHERE event_id = ?",
+                                Integer.class,
+                                eventId);
         }
 
         private UUID toRepositoryId(String eventId) {
