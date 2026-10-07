@@ -79,6 +79,9 @@ class FailureEventNormalizationProcessorRollbackIntegrationTest {
     private FailureEventRetryStateRecorder retryStateRecorder;
 
     @Autowired
+    private FailureEventRetryPolicy retryPolicy;
+
+    @Autowired
     private FailureEventRepository failureEventRepository;
 
     @Autowired
@@ -268,6 +271,71 @@ class FailureEventNormalizationProcessorRollbackIntegrationTest {
     }
 
     @Test
+    void shouldExhaustRepeatedFailures() {
+        when(failureEventNormalizer.normalize(any()))
+                .thenReturn(normalizedEventExceedingDatabaseColumnLength());
+
+        UUID eventId = UUID.fromString(
+                ingestionService.ingestFailureEvent(validRequest("trace-normalization-exhaustion-001")));
+        Map<String, Object> originalRaw = loadRawContent(eventId);
+        int maxAttempts = retryPolicy.getMaxAttempts();
+
+        for (int attemptNumber = 1; attemptNumber <= maxAttempts; attemptNumber++) {
+            ClaimedFailureEvent claim = claimService
+                    .claimNextEligibleForProcessing(1)
+                    .stream()
+                    .filter(candidate -> candidate.eventId().equals(eventId))
+                    .findFirst()
+                    .orElseThrow();
+            assertEquals(attemptNumber, claim.attemptNumber());
+
+            processingService.process(claim);
+
+            FailureEventEntity afterFailure = failureEventRepository.findById(eventId).orElseThrow();
+            assertEquals(attemptNumber, afterFailure.getAttemptCount());
+            assertEquals(originalRaw, loadRawContent(eventId));
+            assertNull(afterFailure.getProcessingStartedAt());
+            assertEquals(0, jdbcTemplate.queryForObject(
+                    "SELECT COUNT(*) FROM normalized_failure_event WHERE event_id = ?", Integer.class, eventId));
+
+            if (attemptNumber < maxAttempts) {
+                assertEquals(ProcessingStatus.RETRYABLE, afterFailure.getProcessingStatus());
+                assertEquals("NORMALIZED_WRITE_FAILURE", afterFailure.getFailureCode());
+                assertEquals("Normalized failure event could not be persisted", afterFailure.getFailureReason());
+                assertNotNull(afterFailure.getNextAttemptAt());
+                assertTrue(afterFailure.getNextAttemptAt().isAfter(Instant.now()));
+                jdbcTemplate.update(
+                        "UPDATE failure_event SET next_attempt_at = ? WHERE event_id = ?",
+                        Timestamp.from(Instant.now().minusSeconds(1)),
+                        eventId);
+            } else {
+                assertEquals(ProcessingStatus.FAILED, afterFailure.getProcessingStatus());
+                assertEquals("RETRY_EXHAUSTED", afterFailure.getFailureCode());
+                assertEquals(
+                        "Automatic retries exhausted after NORMALIZED_WRITE_FAILURE: "
+                                + "Normalized failure event could not be persisted",
+                        afterFailure.getFailureReason());
+                assertNull(afterFailure.getNextAttemptAt());
+                assertNotNull(afterFailure.getLastAttemptAt());
+            }
+        }
+
+        FailureEventEntity exhausted = failureEventRepository.findById(eventId).orElseThrow();
+        assertEquals(originalRaw, loadRawContent(eventId));
+        assertEquals(ProcessingStatus.FAILED, exhausted.getProcessingStatus());
+        assertEquals("RETRY_EXHAUSTED", exhausted.getFailureCode());
+        assertEquals(maxAttempts, exhausted.getAttemptCount());
+        assertTrue(exhausted.getAttemptCount() <= maxAttempts);
+        assertNull(exhausted.getProcessingStartedAt());
+        assertNull(exhausted.getNextAttemptAt());
+        assertNotNull(exhausted.getLastAttemptAt());
+        assertEquals(0, jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM normalized_failure_event WHERE event_id = ?", Integer.class, eventId));
+        assertTrue(claimService.claimNextEligibleForProcessing(1).stream()
+                .noneMatch(claim -> claim.eventId().equals(eventId)));
+    }
+
+    @Test
     void shouldRecordRetryableWhenNormalizationTransactionFailsDuringCompletion() {
         double normalizedBefore = counter("normalized");
         double retriesBefore = counter("retry.scheduled", "source", "processing");
@@ -412,6 +480,14 @@ class FailureEventNormalizationProcessorRollbackIntegrationTest {
                 Map.of("source", "test"),
                 Map.of(),
                 Map.of());
+    }
+
+    private Map<String, Object> loadRawContent(UUID eventId) {
+        return jdbcTemplate.queryForMap("""
+                SELECT event_id, occurred_at, server_name, service_name, environment, event_type,
+                       error_type, message, dependency_target, trace_id, severity_hint, raw_payload
+                FROM failure_event WHERE event_id = ?
+                """, eventId);
     }
 
     private NormalizedFailureEvent successfulNormalizedEvent(String serviceName) {
