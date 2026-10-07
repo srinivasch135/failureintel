@@ -17,6 +17,7 @@ import java.sql.Timestamp;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.UUID;
+import java.util.Optional;
 
 import static com.failureintel.test.support.FailureEventTestFixtures.validRequest;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -27,9 +28,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class FailureEventProcessingWorkerRestartIntegrationTest {
 
     @Test
-    void shouldResumeReceivedAndAbandonedProcessingEventsAfterApplicationContextRestart() {
+    void shouldResumePersistedWorkAfterRestart() {
         UUID abandonedClaimId;
         UUID receivedEventId;
+        UUID retryableEventId;
         try (ConfigurableApplicationContext initialContext = startApplicationContext(false)) {
             FailureEventIngestionService ingestionService = initialContext.getBean(
                     FailureEventIngestionService.class);
@@ -49,6 +51,28 @@ class FailureEventProcessingWorkerRestartIntegrationTest {
                             + "WHERE event_id = ?",
                     Timestamp.from(Instant.now().minusSeconds(3600)),
                     abandonedClaimId);
+
+            retryableEventId = UUID.fromString(ingestionService.ingestFailureEvent(
+                    validRequest("worker-restart-retryable-" + UUID.randomUUID())));
+            ClaimedFailureEvent retryableClaim = initialContext.getBean(FailureEventClaimService.class)
+                    .claimNextEligibleForProcessing(1)
+                    .stream()
+                    .filter(candidate -> candidate.eventId().equals(retryableEventId))
+                    .findFirst()
+                    .orElseThrow();
+            boolean recorded = initialContext.getBean(FailureEventRetryStateRecorder.class).recordFailure(
+                    retryableClaim,
+                    FailureEventRetryableFailure.DATABASE_TIMEOUT,
+                    Optional.of(Instant.now().plusSeconds(60)));
+            assertTrue(recorded);
+            FailureEventEntity retryable = initialContext.getBean(FailureEventRepository.class)
+                    .findById(retryableEventId)
+                    .orElseThrow();
+            assertEquals(ProcessingStatus.RETRYABLE, retryable.getProcessingStatus());
+            assertEquals(1, retryable.getAttemptCount());
+            assertEquals("DATABASE_TIMEOUT", retryable.getFailureCode());
+            assertNotNull(retryable.getNextAttemptAt());
+            assertNull(retryable.getProcessingStartedAt());
 
             receivedEventId = UUID.fromString(ingestionService.ingestFailureEvent(
                     validRequest("worker-restart-received-" + UUID.randomUUID())));
@@ -90,6 +114,11 @@ class FailureEventProcessingWorkerRestartIntegrationTest {
                     Timestamp.from(Instant.now().minusSeconds(1)),
                     abandonedClaimId);
 
+            jdbcTemplate.update(
+                    "UPDATE failure_event SET next_attempt_at = ?, version = version + 1 WHERE event_id = ?",
+                    Timestamp.from(Instant.now().minusSeconds(1)),
+                    retryableEventId);
+
             Awaitility.await()
                     .atMost(Duration.ofSeconds(10))
                     .untilAsserted(() -> {
@@ -97,12 +126,35 @@ class FailureEventProcessingWorkerRestartIntegrationTest {
                                 .orElseThrow().getProcessingStatus());
                         assertEquals(ProcessingStatus.NORMALIZED, failureEventRepository.findById(receivedEventId)
                                 .orElseThrow().getProcessingStatus());
+                        assertEquals(ProcessingStatus.NORMALIZED, failureEventRepository.findById(retryableEventId)
+                                .orElseThrow().getProcessingStatus());
                         assertTrue(normalizedRepository.existsById(abandonedClaimId));
                         assertTrue(normalizedRepository.existsById(receivedEventId));
+                        assertTrue(normalizedRepository.existsById(retryableEventId));
                         assertEquals(2, failureEventRepository.findById(abandonedClaimId)
                                 .orElseThrow().getAttemptCount());
+                        assertEquals(2, failureEventRepository.findById(retryableEventId)
+                                .orElseThrow().getAttemptCount());
+                        assertEquals(1, countNormalized(jdbcTemplate, abandonedClaimId));
+                        assertEquals(1, countNormalized(jdbcTemplate, receivedEventId));
+                        assertEquals(1, countNormalized(jdbcTemplate, retryableEventId));
                     });
+
+            assertTrue(failureEventRepository.existsById(abandonedClaimId));
+            assertTrue(failureEventRepository.existsById(receivedEventId));
+            assertTrue(failureEventRepository.existsById(retryableEventId));
+            normalizedRepository.deleteAllById(
+                    java.util.List.of(abandonedClaimId, receivedEventId, retryableEventId));
+            failureEventRepository.deleteAllById(
+                    java.util.List.of(abandonedClaimId, receivedEventId, retryableEventId));
         }
+    }
+
+    private int countNormalized(JdbcTemplate jdbcTemplate, UUID eventId) {
+        return jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM normalized_failure_event WHERE event_id = ?",
+                Integer.class,
+                eventId);
     }
 
     private ConfigurableApplicationContext startApplicationContext(boolean workerEnabled) {
