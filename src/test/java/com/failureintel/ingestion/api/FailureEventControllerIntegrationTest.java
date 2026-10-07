@@ -9,8 +9,12 @@ import com.failureintel.ingestion.api.dto.FailureEventIngestionRequest;
 import com.failureintel.ingestion.api.dto.FailureEventResponse;
 import com.failureintel.ingestion.application.service.FailureEventIngestionService;
 import com.failureintel.ingestion.application.service.FailureEventQueryService;
+import com.failureintel.ingestion.domain.normalization.FailureEventNormalizer;
 import com.failureintel.ingestion.domain.normalization.NormalizationStatus;
+import com.failureintel.ingestion.domain.parser.FailureEventParser;
 import jakarta.persistence.EntityManager;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -22,6 +26,7 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.server.LocalServerPort;
 import com.failureintel.test.support.PostgresTestContainer;
 import org.springframework.dao.DataAccessResourceFailureException;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -32,6 +37,7 @@ import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.context.TestPropertySource;
 
 import java.time.Instant;
+import java.time.LocalDateTime;
 import java.io.ByteArrayInputStream;
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -64,7 +70,8 @@ import static org.mockito.Mockito.doThrow;
 @AutoConfigureMockMvc
 @TestPropertySource(properties = {
         "spring.jpa.hibernate.ddl-auto=validate",
-        "failure-event.ingestion.max-request-size-bytes=4096"
+        "failure-event.ingestion.max-request-size-bytes=4096",
+        "failure-event.processing.worker.enabled=false"
 })
 class FailureEventControllerIntegrationTest {
 
@@ -103,6 +110,17 @@ class FailureEventControllerIntegrationTest {
     @Autowired
     private NormalizedFailureEventRepository normalizedFailureEventRepository;
 
+    @Autowired
+    private JdbcTemplate jdbcTemplate;
+
+    private final ObjectMapper objectMapper = new ObjectMapper();
+
+    @MockitoSpyBean
+    private FailureEventParser failureEventParser;
+
+    @MockitoSpyBean
+    private FailureEventNormalizer failureEventNormalizer;
+
     @MockitoSpyBean
     private NormalizedFailureEventRepository normalizedFailureEventRepositorySpy;
 
@@ -113,22 +131,81 @@ class FailureEventControllerIntegrationTest {
     }
 
     @Test
-    void shouldAcceptAndDurablyCaptureRawFailureEvent() throws Exception {
-        mockMvc.perform(post("/api/v1/failure-events")
-                        .contentType(APPLICATION_JSON)
-                        .content(validRequestJson()))
-                .andExpect(status().isAccepted())
-                .andExpect(jsonPath("$.status").value("RECEIVED"))
-                .andExpect(jsonPath("$.message").value("Failure event accepted for processing"));
+    void shouldAcceptOnlyAfterCommittingRawEventWithoutParsingOrNormalizing() throws Exception {
+        String traceId = "trace-http-durable-capture-" + UUID.randomUUID();
+        String requestBody = validRequestJson().replace("trace-controller-001", traceId);
 
-        FailureEventEntity persisted = failureEventRepository
-                .findFirstByTraceIdOrderByIngestedAtDescEventIdDesc("trace-controller-001")
-                .orElseThrow();
+        HttpResponse<String> response = postOverHttpForBody("/api/v1/failure-events", requestBody);
 
-        assertEquals(ProcessingStatus.RECEIVED, persisted.getProcessingStatus());
-        assertEquals(0, persisted.getAttemptCount());
-        assertNull(persisted.getFailureReason());
-        assertFalse(normalizedFailureEventRepository.existsById(persisted.getEventId()));
+        assertEquals(202, response.statusCode());
+        JsonNode accepted = objectMapper.readTree(response.body());
+        assertTrue(accepted.hasNonNull("eventId"));
+        assertEquals("RECEIVED", accepted.path("status").asText());
+        UUID eventId = UUID.fromString(accepted.path("eventId").asText());
+
+        Map<String, Object> committedRaw = jdbcTemplate.queryForMap("""
+                SELECT server_name, service_name, environment, event_type, error_type, message,
+                       dependency_target, trace_id, severity_hint, occurred_at, raw_payload,
+                       processing_status, attempt_count, processing_started_at, last_attempt_at,
+                       next_attempt_at, failure_code, failure_reason
+                FROM failure_event WHERE event_id = ?
+                """, eventId);
+
+        assertEquals("datadog", committedRaw.get("server_name"));
+        assertEquals("Payment-Service", committedRaw.get("service_name"));
+        assertEquals("production", committedRaw.get("environment"));
+        assertEquals("ERROR", committedRaw.get("event_type"));
+        assertEquals("PSQLException", committedRaw.get("error_type"));
+        assertEquals("Connection timeout after 5000ms", committedRaw.get("message"));
+        assertEquals("payment-database", committedRaw.get("dependency_target"));
+        assertEquals(traceId, committedRaw.get("trace_id"));
+        assertEquals("HIGH", committedRaw.get("severity_hint"));
+        assertEquals(LocalDateTime.of(2026, 8, 3, 20, 0),
+                ((java.sql.Timestamp) committedRaw.get("occurred_at")).toLocalDateTime());
+        assertEquals("{\"host\":\"payment-prod-01\",\"region\":\"us-east-1\"}",
+                committedRaw.get("raw_payload"));
+        assertEquals("RECEIVED", committedRaw.get("processing_status"));
+        assertEquals(0, ((Number) committedRaw.get("attempt_count")).intValue());
+        assertNull(committedRaw.get("processing_started_at"));
+        assertNull(committedRaw.get("last_attempt_at"));
+        assertNull(committedRaw.get("next_attempt_at"));
+        assertNull(committedRaw.get("failure_code"));
+        assertNull(committedRaw.get("failure_reason"));
+        assertFalse(normalizedFailureEventRepository.existsById(eventId));
+        org.mockito.Mockito.verifyNoInteractions(failureEventParser, failureEventNormalizer);
+    }
+
+    @Test
+    void shouldReturnServerErrorAndRollBackWhenPostgresRejectsCaptureAtCommit() throws Exception {
+        String traceId = "trace-http-commit-rejection-" + UUID.randomUUID();
+        String functionName = "test_reject_failure_event_commit_" + UUID.randomUUID().toString().replace("-", "");
+        String triggerName = "test_reject_failure_event_commit_" + UUID.randomUUID().toString().replace("-", "");
+        boolean fixtureAttempted = false;
+
+        try {
+            fixtureAttempted = true;
+            installDeferredFailureEventTrigger(functionName, triggerName, traceId);
+
+            HttpResponse<String> response = postOverHttpForBody(
+                    "/api/v1/failure-events",
+                    validRequestJson().replace("trace-controller-001", traceId));
+
+            assertEquals(500, response.statusCode());
+            JsonNode error = objectMapper.readTree(response.body());
+            assertFalse(error.has("eventId"));
+            assertTrue(error.path("error").asText().endsWith("ERROR"));
+            assertEquals(0, jdbcTemplate.queryForObject(
+                    "SELECT COUNT(*) FROM failure_event WHERE trace_id = ?", Integer.class, traceId));
+            assertEquals(0, jdbcTemplate.queryForObject("""
+                    SELECT COUNT(*) FROM normalized_failure_event
+                    WHERE normalized_trace_id = ?
+                    """, Integer.class, traceId));
+            org.mockito.Mockito.verifyNoInteractions(failureEventParser, failureEventNormalizer);
+        } finally {
+            if (fixtureAttempted) {
+                removeDeferredFailureEventTrigger(functionName, triggerName);
+            }
+        }
     }
 
     @Test
@@ -552,6 +629,42 @@ class FailureEventControllerIntegrationTest {
                 .POST(publisher)
                 .build();
         return httpClient.send(request, HttpResponse.BodyHandlers.discarding()).statusCode();
+    }
+
+    private HttpResponse<String> postOverHttpForBody(String path, String body) throws Exception {
+        HttpRequest request = HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + path))
+                .timeout(Duration.ofSeconds(15))
+                .header("Content-Type", "application/json;charset=UTF-8")
+                .POST(HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8))
+                .build();
+        return httpClient.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+    }
+
+    private void installDeferredFailureEventTrigger(String functionName, String triggerName, String traceId) {
+        jdbcTemplate.execute("""
+                CREATE FUNCTION %s() RETURNS trigger
+                LANGUAGE plpgsql
+                AS $$
+                BEGIN
+                    IF NEW.trace_id = '%s' THEN
+                        RAISE EXCEPTION 'designated integration-test commit rejection'
+                            USING ERRCODE = '23514';
+                    END IF;
+                    RETURN NEW;
+                END;
+                $$
+                """.formatted(functionName, traceId));
+        jdbcTemplate.execute("""
+                CREATE CONSTRAINT TRIGGER %s
+                AFTER INSERT ON failure_event
+                DEFERRABLE INITIALLY DEFERRED
+                FOR EACH ROW EXECUTE FUNCTION %s()
+                """.formatted(triggerName, functionName));
+    }
+
+    private void removeDeferredFailureEventTrigger(String functionName, String triggerName) {
+        jdbcTemplate.execute("DROP TRIGGER IF EXISTS " + triggerName + " ON failure_event");
+        jdbcTemplate.execute("DROP FUNCTION IF EXISTS " + functionName + "()");
     }
 
     private String validRequestJson() {
