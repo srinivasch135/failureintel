@@ -5,11 +5,32 @@ import com.failureintel.infrastructure.persistence.failureevent.entity.Processin
 import org.springframework.data.domain.*;
 import org.springframework.data.jpa.repository.*;
 import org.springframework.data.repository.query.Param;
+import org.springframework.transaction.annotation.Propagation;
+import org.springframework.transaction.annotation.Transactional;
+import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.*;
 
 public interface FailureEventRepository extends JpaRepository<FailureEventEntity, UUID> {
-        Optional<FailureEventEntity> findByTraceId(String traceId);
+        @Transactional(readOnly = true)
+        long countByProcessingStatus(ProcessingStatus processingStatus);
+
+        @Transactional(readOnly = true)
+        @Query(value = """
+                        SELECT EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - MIN(ingested_at)))
+                        FROM failure_event
+                        WHERE processing_status IN ('RECEIVED', 'PROCESSING', 'RETRYABLE')
+                        """, nativeQuery = true)
+        BigDecimal findOldestUnfinishedEventAgeSeconds();
+
+        Optional<FailureEventEntity> findFirstByTraceIdOrderByIngestedAtDescEventIdDesc(String traceId);
+
+        @Transactional(readOnly = true, propagation = Propagation.REQUIRES_NEW)
+        Optional<FailureEventEntity> findByIdempotencyKey(String idempotencyKey);
+
+        @Override
+        @Transactional(propagation = Propagation.REQUIRES_NEW)
+        FailureEventEntity saveAndFlush(FailureEventEntity entity);
 
         boolean existsByTraceId(String traceId);
 
@@ -33,6 +54,52 @@ public interface FailureEventRepository extends JpaRepository<FailureEventEntity
         @Query("UPDATE FailureEventEntity fe SET fe.processingStatus=:processingStatus WHERE fe.eventId=:eventId")
         int updateProcessingStatus(@Param("eventId") UUID eventId,
                         @Param("processingStatus") ProcessingStatus processingStatus);
+
+        @Query(value = """
+                        SELECT CURRENT_TIMESTAMP
+                        """, nativeQuery = true)
+        Instant currentDatabaseTime();
+
+        @Query(value = """
+                        SELECT fe.*
+                        FROM failure_event fe
+                        WHERE fe.processing_status = 'RECEIVED'
+                           OR (
+                                fe.processing_status = 'RETRYABLE'
+                                AND (
+                                    fe.next_attempt_at <= :eligibleAt
+                                    OR fe.attempt_count >= :maxAttempts
+                                )
+                           )
+                        ORDER BY fe.ingested_at ASC, fe.event_id ASC
+                        LIMIT :batchSize
+                        FOR UPDATE SKIP LOCKED
+                        """, nativeQuery = true)
+        List<FailureEventEntity> lockNextEligibleForProcessing(
+                        @Param("eligibleAt") Instant eligibleAt,
+                        @Param("batchSize") int batchSize,
+                        @Param("maxAttempts") int maxAttempts);
+
+        @Query(value = """
+                        SELECT fe.*
+                        FROM failure_event fe
+                        WHERE fe.processing_status = 'PROCESSING'
+                          AND COALESCE(
+                                fe.processing_started_at,
+                                fe.last_attempt_at,
+                                fe.ingested_at
+                              ) <= :expiredBefore
+                        ORDER BY COALESCE(
+                                fe.processing_started_at,
+                                fe.last_attempt_at,
+                                fe.ingested_at
+                              ) ASC, fe.event_id ASC
+                        LIMIT :batchSize
+                        FOR UPDATE SKIP LOCKED
+                        """, nativeQuery = true)
+        List<FailureEventEntity> lockExpiredProcessingClaims(
+                        @Param("expiredBefore") Instant expiredBefore,
+                        @Param("batchSize") int batchSize);
 
         Page<FailureEventEntity> findByOccurredAtBetween(
                         Instant start,

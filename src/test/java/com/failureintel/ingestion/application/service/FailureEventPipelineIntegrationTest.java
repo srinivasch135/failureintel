@@ -1,26 +1,30 @@
 package com.failureintel.ingestion.application.service;
 
 import com.failureintel.ingestion.api.dto.FailureEventIngestionRequest;
+import com.failureintel.ingestion.application.config.FailureEventWorkerExecutorConfiguration;
+import com.failureintel.ingestion.application.config.FailureEventWorkerProperties;
 import com.failureintel.ingestion.application.exception.DuplicateFailureEventException;
-import com.failureintel.ingestion.domain.normalization.NormalizationStatus;
+import com.failureintel.ingestion.domain.model.NormalizedFailureEvent;
+import com.failureintel.ingestion.domain.model.ParsedFailureEvent;
+import com.failureintel.ingestion.domain.normalization.FailureEventNormalizer;
 import com.failureintel.infrastructure.persistence.failureevent.entity.FailureEventEntity;
 import com.failureintel.infrastructure.persistence.failureevent.entity.ProcessingStatus;
+import com.failureintel.infrastructure.persistence.failureevent.mapper.FailureEventEntityMapper;
 import com.failureintel.infrastructure.persistence.failureevent.repository.FailureEventRepository;
-import com.failureintel.infrastructure.persistence.normalizedFailureEvent.entity.NormalizedFailureEventEntity;
 import com.failureintel.infrastructure.persistence.normalizedFailureEvent.repository.NormalizedFailureEventRepository;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
+import com.failureintel.test.support.PostgresTestContainer;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.test.context.TestPropertySource;
-import org.testcontainers.utility.DockerImageName;
-import org.testcontainers.containers.PostgreSQLContainer;
-import org.testcontainers.junit.jupiter.Container;
-import org.testcontainers.junit.jupiter.Testcontainers;
-import org.testcontainers.containers.output.Slf4jLogConsumer;
+import org.springframework.test.context.DynamicPropertyRegistry;
+import org.springframework.test.context.DynamicPropertySource;
+import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
+import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 import org.slf4j.LoggerFactory;
 import org.slf4j.Logger;
 
@@ -28,24 +32,30 @@ import java.time.Instant;
 import java.sql.Timestamp;
 import java.util.Map;
 import java.util.UUID;
+import java.util.List;
+import java.util.concurrent.Callable;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doAnswer;
 import static org.junit.jupiter.api.Assertions.*;
 
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
-@Testcontainers
 @TestPropertySource(properties = {
-                "spring.jpa.hibernate.ddl-auto=validate"
+                "spring.jpa.hibernate.ddl-auto=validate",
+                "failure-event.processing.worker.enabled=false",
+                "failure-event.processing.worker.batch-size=3",
+                "failure-event.processing.worker.concurrency=3"
 })
 class FailureEventPipelineIntegrationTest {
         private static final Logger LOGGER = LoggerFactory.getLogger(FailureEventPipelineIntegrationTest.class);
 
-        @Container
-        @ServiceConnection
-        static final PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>(
-                        DockerImageName.parse("postgres:16-alpine"))
-                        .withDatabaseName("failureintel_pipeline_test")
-                        .withUsername("testuser")
-                        .withPassword("testpassword")
-                        .withLogConsumer(new Slf4jLogConsumer(LOGGER));
+        @DynamicPropertySource
+        static void postgresProperties(DynamicPropertyRegistry registry) {
+                PostgresTestContainer.registerDatabase(registry, "failureintel_pipeline_test");
+        }
 
         @Autowired
         private FailureEventIngestionService ingestionService;
@@ -55,6 +65,19 @@ class FailureEventPipelineIntegrationTest {
         private NormalizedFailureEventRepository normalizedFailureEventRepository;
         @Autowired
         private JdbcTemplate jdbcTemplate;
+        @Autowired
+        private MeterRegistry meterRegistry;
+        @Autowired
+        private FailureEventClaimService claimService;
+        @Autowired
+        private FailureEventProcessingService processingService;
+        @Autowired
+        private FailureEventRecoveryService recoveryService;
+        @Autowired
+        private FailureEventWorkerProperties workerProperties;
+
+        @MockitoSpyBean
+        private FailureEventNormalizer failureEventNormalizer;
 
         @AfterEach
         void cleanUpDB() {
@@ -64,28 +87,24 @@ class FailureEventPipelineIntegrationTest {
         }
 
         @Test
-        void shouldProcessNormalizePersistAndReadFailureEvent() {
+        void shouldCaptureAndPersistRawFailureEventWithoutNormalizing() {
                 FailureEventIngestionRequest request = createValidRequest();
                 String returnedEventId = ingestionService.ingestFailureEvent(request);
                 FailureEventEntity savedEvent = failureEventRepository.findById(toRepositoryId(returnedEventId))
                                 .orElseThrow(() -> new AssertionError("Expected persisted failure event: "
                                                 + returnedEventId));
-                NormalizedFailureEventEntity normalizedEvent = normalizedFailureEventRepository
-                                .findById(savedEvent.getEventId())
-                                .orElseThrow(() -> new AssertionError("Expected persisted normalized failure event: "
-                                                + returnedEventId));
+
                 verifySavedEvent(savedEvent, request);
-                verifyNormalizedFields(normalizedEvent);
-                verifyProcessingStatus(savedEvent, normalizedEvent);
-                verifyPersistenceFields(savedEvent, normalizedEvent);
-                verifyRowsShareForeignKey(savedEvent.getEventId());
+                assertEquals(ProcessingStatus.RECEIVED, savedEvent.getProcessingStatus());
+                assertEquals(0, savedEvent.getAttemptCount());
+                assertNull(savedEvent.getFailureReason());
+                assertFalse(normalizedFailureEventRepository.existsById(savedEvent.getEventId()));
                 verifyFailureEventRow(savedEvent.getEventId());
                 verifyFailureEventNoLongerOwnsNormalizedColumns();
-                verifyNormalizedFailureEventRow(savedEvent.getEventId());
         }
 
         @Test
-        void shouldPersistUnknownCanonicalValuesAsPartiallyNormalized() {
+        void shouldPreserveUnknownRawValuesForLaterProcessing() {
                 FailureEventIngestionRequest request = createValidRequest();
                 request.setTraceId("trace-integration-partial-001");
                 request.setEnvironment("sandbox");
@@ -93,23 +112,15 @@ class FailureEventPipelineIntegrationTest {
 
                 UUID eventId = toRepositoryId(ingestionService.ingestFailureEvent(request));
                 FailureEventEntity savedEvent = failureEventRepository.findById(eventId).orElseThrow();
-                NormalizedFailureEventEntity normalizedEvent = normalizedFailureEventRepository
-                                .findById(eventId)
-                                .orElseThrow();
 
-                assertEquals(ProcessingStatus.NORMALIZED, savedEvent.getProcessingStatus());
-                assertEquals(NormalizationStatus.PARTIALLY_NORMALIZED,
-                                normalizedEvent.getNormalizationStatus());
-                assertEquals("unknown", normalizedEvent.getNormalizedEnvironment());
-                assertEquals("vendor_outage", normalizedEvent.getNormalizedEventType());
-                assertEquals(true,
-                                normalizedEvent.getNormalizationMetadata().get("unknownEnvironmentValue"));
-                assertEquals(true,
-                                normalizedEvent.getNormalizationMetadata().get("unknownEventTypeValue"));
+                assertEquals(ProcessingStatus.RECEIVED, savedEvent.getProcessingStatus());
+                assertEquals("sandbox", savedEvent.getEnvironment());
+                assertEquals("vendor_outage", savedEvent.getEventType());
+                assertFalse(normalizedFailureEventRepository.existsById(eventId));
         }
 
         @Test
-        void shouldPersistEmptyPayloadAsFailedWithoutNormalizedRow() {
+        void shouldPersistEmptyPayloadAsReceivedForLaterClassification() {
                 FailureEventIngestionRequest request = createValidRequest();
                 request.setTraceId("trace-integration-empty-payload-001");
                 request.setRawPayload(Map.of());
@@ -117,15 +128,15 @@ class FailureEventPipelineIntegrationTest {
                 UUID eventId = toRepositoryId(ingestionService.ingestFailureEvent(request));
                 FailureEventEntity savedEvent = failureEventRepository.findById(eventId).orElseThrow();
 
-                assertEquals(ProcessingStatus.FAILED, savedEvent.getProcessingStatus());
-                assertTrue(savedEvent.getFailureReason().contains("Unsupported or empty raw payload"));
+                assertEquals(ProcessingStatus.RECEIVED, savedEvent.getProcessingStatus());
+                assertNull(savedEvent.getFailureReason());
                 assertFalse(normalizedFailureEventRepository.existsById(eventId));
                 assertEquals(1, failureEventRepository.count());
                 assertEquals(0, normalizedFailureEventRepository.count());
         }
 
         @Test
-        void shouldPersistEventWithoutUsefulFailureDataAsFailedWithoutNormalizedRow() {
+        void shouldPersistStorableEventWithoutUsefulDataAsReceivedForLaterClassification() {
                 FailureEventIngestionRequest request = createValidRequest();
                 request.setServiceName(" ");
                 request.setEnvironment(" ");
@@ -140,37 +151,176 @@ class FailureEventPipelineIntegrationTest {
                 UUID eventId = toRepositoryId(ingestionService.ingestFailureEvent(request));
                 FailureEventEntity savedEvent = failureEventRepository.findById(eventId).orElseThrow();
 
-                assertEquals(ProcessingStatus.FAILED, savedEvent.getProcessingStatus());
-                assertEquals("Event does not contain minimum useful failure data",
-                                savedEvent.getFailureReason());
+                assertEquals(ProcessingStatus.RECEIVED, savedEvent.getProcessingStatus());
+                assertNull(savedEvent.getFailureReason());
                 assertFalse(normalizedFailureEventRepository.existsById(eventId));
                 assertEquals(1, failureEventRepository.count());
                 assertEquals(0, normalizedFailureEventRepository.count());
         }
 
         @Test
-        void shouldRejectDuplicateTraceIdWithoutCreatingAdditionalRows() {
-                FailureEventIngestionRequest firstRequest = createValidRequest();
+        void shouldIsolateBatchFailures() {
+                FailureEventIngestionRequest requestA = requestWithTraceId("trace-batch-a");
+                FailureEventIngestionRequest requestB = requestWithTraceId("trace-batch-b");
+                FailureEventIngestionRequest requestC = requestWithTraceId("trace-batch-c");
+                UUID eventA = toRepositoryId(ingestionService.ingestFailureEvent(requestA));
+                UUID eventB = toRepositoryId(ingestionService.ingestFailureEvent(requestB));
+                UUID eventC = toRepositoryId(ingestionService.ingestFailureEvent(requestC));
 
-                UUID originalEventId = toRepositoryId(ingestionService.ingestFailureEvent(firstRequest));
+                doAnswer(invocation -> {
+                        ParsedFailureEvent parsed = invocation.getArgument(0);
+                        NormalizedFailureEvent normalized = (NormalizedFailureEvent) invocation.callRealMethod();
+                        if (!"trace-batch-b".equals(parsed.getTraceId())) {
+                                return normalized;
+                        }
+                        return withOversizedServiceName(normalized);
+                }).when(failureEventNormalizer).normalize(any());
 
-                DuplicateFailureEventException exception = assertThrows(
-                                DuplicateFailureEventException.class,
-                                () -> ingestionService.ingestFailureEvent(createValidRequest()));
+                ThreadPoolTaskExecutor executor = new FailureEventWorkerExecutorConfiguration()
+                                .failureEventNormalizationExecutor(workerProperties);
+                executor.afterPropertiesSet();
+                try {
+                        FailureEventProcessingWorker worker = new FailureEventProcessingWorker(
+                                        recoveryService,
+                                        claimService,
+                                        processingService,
+                                        workerProperties,
+                                        executor);
+                        worker.processNextBatch();
+                } finally {
+                        executor.destroy();
+                }
 
-                assertEquals(
-                                "Failure event already exists for traceId: trace-integration-001",
-                                exception.getMessage());
-                assertEquals(1, failureEventRepository.count());
-                assertEquals(1, normalizedFailureEventRepository.count());
-                assertTrue(failureEventRepository.existsById(originalEventId));
-                assertTrue(normalizedFailureEventRepository.existsById(originalEventId));
+                FailureEventEntity persistedA = failureEventRepository.findById(eventA).orElseThrow();
+                FailureEventEntity persistedB = failureEventRepository.findById(eventB).orElseThrow();
+                FailureEventEntity persistedC = failureEventRepository.findById(eventC).orElseThrow();
+
+                assertEquals(ProcessingStatus.NORMALIZED, persistedA.getProcessingStatus());
+                assertEquals(1, normalizedCount(eventA));
+                assertEquals("payment-service", normalizedFailureEventRepository.findById(eventA)
+                                .orElseThrow().getNormalizedServiceName());
+
+                assertEquals(ProcessingStatus.RETRYABLE, persistedB.getProcessingStatus());
+                assertEquals("NORMALIZED_WRITE_FAILURE", persistedB.getFailureCode());
+                assertEquals("Normalized failure event could not be persisted", persistedB.getFailureReason());
+                assertEquals(1, persistedB.getAttemptCount());
+                assertNull(persistedB.getProcessingStartedAt());
+                assertNotNull(persistedB.getLastAttemptAt());
+                assertNotNull(persistedB.getNextAttemptAt());
+                assertTrue(persistedB.getNextAttemptAt().isAfter(Instant.now()));
+                assertEquals(0, normalizedCount(eventB));
+
+                assertEquals(ProcessingStatus.NORMALIZED, persistedC.getProcessingStatus());
+                assertEquals(1, normalizedCount(eventC));
+                assertEquals("payment-service", normalizedFailureEventRepository.findById(eventC)
+                                .orElseThrow().getNormalizedServiceName());
+
+                assertTrue(failureEventRepository.existsById(eventA));
+                assertTrue(failureEventRepository.existsById(eventB));
+                assertTrue(failureEventRepository.existsById(eventC));
         }
 
         @Test
-        void shouldEnforceTrimmedTraceIdUniquenessInPostgreSql() {
+        void shouldReturnExistingEventForEquivalentLegacyTraceRetry() {
+                FailureEventIngestionRequest firstRequest = createValidRequest();
+
+                UUID originalEventId = toRepositoryId(ingestionService.ingestFailureEvent(firstRequest));
+                markAsLegacyTraceRow(originalEventId, firstRequest.getTraceId());
+
+                UUID retriedEventId = toRepositoryId(ingestionService.ingestFailureEvent(createValidRequest()));
+
+                assertEquals(originalEventId, retriedEventId);
+                assertEquals(1, failureEventRepository.count());
+                assertEquals(0, normalizedFailureEventRepository.count());
+                assertTrue(failureEventRepository.existsById(originalEventId));
+                assertFalse(normalizedFailureEventRepository.existsById(originalEventId));
+        }
+
+        @Test
+        void shouldPersistDistinctEventForConflictingLegacyTraceRetry() {
+                FailureEventIngestionRequest firstRequest = createValidRequest();
+
+                UUID originalEventId = toRepositoryId(ingestionService.ingestFailureEvent(firstRequest));
+                markAsLegacyTraceRow(originalEventId, firstRequest.getTraceId());
+
+                FailureEventIngestionRequest conflictingRequest = createValidRequest();
+                conflictingRequest.setErrorMessage("different failure content");
+                UUID newEventId = toRepositoryId(ingestionService.ingestFailureEvent(conflictingRequest));
+
+                assertNotEquals(originalEventId, newEventId);
+                assertEquals(2, failureEventRepository.count());
+        }
+
+        @Test
+        void shouldAllowDistinctExplicitIdempotencyKeysForEventsWithSameTraceId() {
+                FailureEventIngestionRequest firstRequest = createValidRequest();
+                firstRequest.setIdempotencyKey("event-001");
+                FailureEventIngestionRequest secondRequest = createValidRequest();
+                secondRequest.setIdempotencyKey("event-002");
+
+                UUID firstEventId = toRepositoryId(ingestionService.ingestFailureEvent(firstRequest));
+                UUID secondEventId = toRepositoryId(ingestionService.ingestFailureEvent(secondRequest));
+
+                assertNotEquals(firstEventId, secondEventId);
+                assertEquals(2, failureEventRepository.count());
+                assertEquals(2, failureEventRepository.findAll().stream()
+                                .map(FailureEventEntity::getTraceId)
+                                .filter("trace-integration-001"::equals)
+                                .count());
+        }
+
+        @Test
+        void shouldReturnOneEventIdForConcurrentEquivalentRequests() throws Exception {
+                FailureEventIngestionRequest firstRequest = createValidRequest();
+                firstRequest.setIdempotencyKey("event-concurrent-001");
+                double acceptedBefore = meterRegistry.get("failureintel.events.raw.accepted").counter().count();
+                double captureFailuresBefore = meterRegistry.get("failureintel.events.capture.failures")
+                                .counter().count();
+
+                ExecutorService executor = Executors.newFixedThreadPool(2);
+                CountDownLatch ready = new CountDownLatch(2);
+                Callable<String> ingest = () -> {
+                        ready.countDown();
+                        ready.await();
+                        return ingestionService.ingestFailureEvent(firstRequest);
+                };
+                try {
+                        List<Future<String>> results = executor.invokeAll(List.of(ingest, ingest));
+                        String firstEventId = results.get(0).get();
+                        String secondEventId = results.get(1).get();
+
+                        assertEquals(firstEventId, secondEventId);
+                        assertEquals(1, failureEventRepository.count());
+                        assertEquals(acceptedBefore + 1,
+                                        meterRegistry.get("failureintel.events.raw.accepted").counter().count());
+                        assertEquals(captureFailuresBefore,
+                                        meterRegistry.get("failureintel.events.capture.failures").counter().count());
+                } finally {
+                        executor.shutdownNow();
+                }
+        }
+
+        @Test
+        void shouldRejectSameExplicitIdempotencyKeyWhenContentDiffers() {
+                FailureEventIngestionRequest firstRequest = createValidRequest();
+                firstRequest.setIdempotencyKey("event-conflict-001");
+                ingestionService.ingestFailureEvent(firstRequest);
+
+                FailureEventIngestionRequest conflictingRequest = createValidRequest();
+                conflictingRequest.setIdempotencyKey("event-conflict-001");
+                conflictingRequest.setErrorMessage("Different failure content");
+
+                assertThrows(
+                                DuplicateFailureEventException.class,
+                                () -> ingestionService.ingestFailureEvent(conflictingRequest));
+                assertEquals(1, failureEventRepository.count());
+        }
+
+        @Test
+        void shouldEnforceIdempotencyKeyUniquenessInPostgreSql() {
                 FailureEventIngestionRequest firstRequest = createValidRequest();
                 firstRequest.setTraceId("trace-database-unique-001");
+                firstRequest.setIdempotencyKey("database-unique-001");
                 ingestionService.ingestFailureEvent(firstRequest);
 
                 assertThrows(
@@ -185,8 +335,9 @@ class FailureEventPipelineIntegrationTest {
                                                                     environment,
                                                                     event_type,
                                                                     trace_id,
+                                                                    idempotency_key,
                                                                     processing_status
-                                                                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                                                                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                                                                 """,
                                                 UUID.randomUUID(),
                                                 Timestamp.from(Instant.parse("2026-08-03T20:00:00Z")),
@@ -194,11 +345,12 @@ class FailureEventPipelineIntegrationTest {
                                                 "Payment-Service",
                                                 "PROD",
                                                 "ERROR",
-                                                "  trace-database-unique-001  ",
-                                                ProcessingStatus.NORMALIZED.name()));
+                                                "trace-other-001",
+                                                "key:database-unique-001",
+                                                ProcessingStatus.RECEIVED.name()));
 
                 assertEquals(1, failureEventRepository.count());
-                assertEquals(1, normalizedFailureEventRepository.count());
+                assertEquals(0, normalizedFailureEventRepository.count());
         }
 
         public FailureEventIngestionRequest createValidRequest() {
@@ -219,12 +371,52 @@ class FailureEventPipelineIntegrationTest {
                 return request;
         }
 
+        private FailureEventIngestionRequest requestWithTraceId(String traceId) {
+                FailureEventIngestionRequest request = createValidRequest();
+                request.setTraceId(traceId);
+                return request;
+        }
+
+        private NormalizedFailureEvent withOversizedServiceName(NormalizedFailureEvent normalized) {
+                return new NormalizedFailureEvent(
+                                normalized.getEventId(),
+                                "x".repeat(256),
+                                normalized.getEnvironment(),
+                                normalized.getEventType(),
+                                normalized.getErrorType(),
+                                normalized.getErrorMessage(),
+                                normalized.getDependencyTarget(),
+                                normalized.getTraceId(),
+                                normalized.getSeverity(),
+                                normalized.getOccurredAt(),
+                                normalized.getNormalizedAt(),
+                                normalized.getNormalizationStatus(),
+                                normalized.getNormalizedPayload(),
+                                normalized.getSourceMetadata(),
+                                normalized.getNormalizationMetadata());
+        }
+
+        private int normalizedCount(UUID eventId) {
+                return jdbcTemplate.queryForObject(
+                                "SELECT COUNT(*) FROM normalized_failure_event WHERE event_id = ?",
+                                Integer.class,
+                                eventId);
+        }
+
         private UUID toRepositoryId(String eventId) {
                 try {
                         return UUID.fromString(eventId);
                 } catch (IllegalArgumentException e) {
                         throw new AssertionError("Invalid event ID format: " + eventId, e);
                 }
+        }
+
+        private void markAsLegacyTraceRow(UUID eventId, String traceId) {
+                FailureEventEntity legacyEvent = failureEventRepository.findById(eventId).orElseThrow();
+                legacyEvent.setIdempotencyKey("trace:" + traceId);
+                legacyEvent.setIngestionFingerprint(
+                                FailureEventFingerprint.calculate(FailureEventEntityMapper.toRaw(legacyEvent)));
+                failureEventRepository.saveAndFlush(legacyEvent);
         }
 
         private void verifySavedEvent(FailureEventEntity savedEvent, FailureEventIngestionRequest request) {
@@ -257,70 +449,6 @@ class FailureEventPipelineIntegrationTest {
                 assertNotNull(savedEvent.getRawPayload());
         }
 
-        private void verifyNormalizedFields(NormalizedFailureEventEntity normalizedEvent) {
-                assertEquals(
-                                "payment-service",
-                                normalizedEvent.getNormalizedServiceName());
-
-                assertEquals(
-                                "prod",
-                                normalizedEvent.getNormalizedEnvironment());
-
-                assertEquals(
-                                "exception",
-                                normalizedEvent.getNormalizedEventType());
-
-                assertEquals(
-                                "PSQLException",
-                                normalizedEvent.getNormalizedErrorType());
-
-                assertEquals(
-                                "high",
-                                normalizedEvent.getNormalizedSeverity());
-        }
-
-        private void verifyProcessingStatus(
-                        FailureEventEntity savedEvent,
-                        NormalizedFailureEventEntity normalizedEvent) {
-                assertEquals(
-                                ProcessingStatus.NORMALIZED,
-                                savedEvent.getProcessingStatus());
-
-                assertEquals(
-                                NormalizationStatus.FULLY_NORMALIZED,
-                                normalizedEvent.getNormalizationStatus());
-        }
-
-        private void verifyPersistenceFields(
-                        FailureEventEntity savedEvent,
-                        NormalizedFailureEventEntity normalizedEvent) {
-                assertNotNull(savedEvent.getEventId());
-                assertNotNull(savedEvent.getIngestedAt());
-
-                assertFalse(
-                                savedEvent.getRawPayload().isEmpty(),
-                                "Raw payload should be preserved");
-
-                assertFalse(
-                                normalizedEvent.getNormalizedPayload().isEmpty(),
-                                "Normalized payload should be preserved");
-        }
-
-        private void verifyRowsShareForeignKey(UUID eventId) {
-                Integer joinedRowCount = jdbcTemplate.queryForObject(
-                                """
-                                                SELECT COUNT(*)
-                                                FROM failure_event fe
-                                                JOIN normalized_failure_event nfe
-                                                  ON nfe.event_id = fe.event_id
-                                                WHERE fe.event_id = ?
-                                                """,
-                                Integer.class,
-                                eventId);
-
-                assertEquals(1, joinedRowCount);
-        }
-
         private void verifyFailureEventRow(UUID eventId) {
                 Map<String, Object> row = jdbcTemplate.queryForMap(
                                 """
@@ -349,7 +477,7 @@ class FailureEventPipelineIntegrationTest {
                 assertEquals("payment-database", row.get("dependency_target"));
                 assertEquals("trace-integration-001", row.get("trace_id"));
                 assertEquals("ERROR", row.get("severity_hint"));
-                assertEquals(ProcessingStatus.NORMALIZED.name(), row.get("processing_status"));
+                assertEquals(ProcessingStatus.RECEIVED.name(), row.get("processing_status"));
                 assertTrue(row.get("raw_payload").toString().contains("payment-prod-01"));
         }
 
@@ -378,39 +506,6 @@ class FailureEventPipelineIntegrationTest {
                                 Integer.class);
 
                 assertEquals(0, oldNormalizedColumnCount);
-        }
-
-        private void verifyNormalizedFailureEventRow(UUID eventId) {
-                Map<String, Object> row = jdbcTemplate.queryForMap(
-                                """
-                                                SELECT normalized_service_name,
-                                                       normalized_environment,
-                                                       normalized_event_type,
-                                                       normalized_error_type,
-                                                       normalized_error_message,
-                                                       normalized_dependency_target,
-                                                       normalized_trace_id,
-                                                       normalized_severity,
-                                                       normalization_status,
-                                                       normalized_payload
-                                                FROM normalized_failure_event
-                                                WHERE event_id = ?
-                                                """,
-                                eventId);
-
-                assertEquals("payment-service", row.get("normalized_service_name"));
-                assertEquals("prod", row.get("normalized_environment"));
-                assertEquals("exception", row.get("normalized_event_type"));
-                assertEquals("PSQLException", row.get("normalized_error_type"));
-                assertEquals("Connection timeout after 5000ms", row.get("normalized_error_message"));
-                assertEquals("payment-database", row.get("normalized_dependency_target"));
-                assertEquals("trace-integration-001", row.get("normalized_trace_id"));
-                assertEquals("high", row.get("normalized_severity"));
-                assertEquals(NormalizationStatus.FULLY_NORMALIZED.name(), row.get("normalization_status"));
-
-                String normalizedPayload = row.get("normalized_payload").toString();
-                assertTrue(normalizedPayload.contains("payment-prod-01"));
-                assertTrue(normalizedPayload.contains("us-east-1"));
         }
 
 }

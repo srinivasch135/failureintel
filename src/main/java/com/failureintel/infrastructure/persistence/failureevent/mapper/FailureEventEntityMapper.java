@@ -1,6 +1,7 @@
 package com.failureintel.infrastructure.persistence.failureevent.mapper;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.failureintel.ingestion.domain.model.RawFailureEvent;
 import com.failureintel.infrastructure.persistence.failureevent.entity.FailureEventEntity;
@@ -11,6 +12,12 @@ import java.util.Objects;
 
 public final class FailureEventEntityMapper {
 
+    public static final class MalformedRawPayloadException extends RuntimeException {
+        public MalformedRawPayloadException(String message, Throwable cause) {
+            super(message, cause);
+        }
+    }
+
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
     private FailureEventEntityMapper() {
@@ -20,9 +27,29 @@ public final class FailureEventEntityMapper {
         Objects.requireNonNull(rawFailureEvent, "rawFailureEvent must not be null");
 
         FailureEventEntity entity = mapRawFields(rawFailureEvent);
-        entity.setProcessingStatus(ProcessingStatus.NORMALIZED);
+        entity.setProcessingStatus(ProcessingStatus.RECEIVED);
 
         return entity;
+    }
+
+    public static RawFailureEvent toRaw(FailureEventEntity entity) {
+        Objects.requireNonNull(entity, "entity must not be null");
+
+        return new RawFailureEvent(
+                entity.getEventId(),
+                entity.getSourceSystem(),
+                entity.getServiceName(),
+                entity.getEnvironment(),
+                entity.getEventType(),
+                entity.getErrorType(),
+                entity.getMessage(),
+                entity.getDependencyTarget(),
+                entity.getTraceId(),
+                entity.getSeverityHint(),
+                entity.getOccurredAt(),
+                entity.getIngestedAt(),
+                fromJson(entity.getRawPayload()),
+                entity.getSourceMetadata() == null ? Map.of() : entity.getSourceMetadata());
     }
 
     public static FailureEventEntity failedFromRaw(
@@ -52,6 +79,7 @@ public final class FailureEventEntityMapper {
         entity.setOccurredAt(rawFailureEvent.getOccuredAt());
         entity.setIngestedAt(rawFailureEvent.getReceivedAt());
         entity.setRawPayload(toJson(rawFailureEvent.getRawPayload()));
+        entity.setSourceMetadata(rawFailureEvent.getMetaData());
         return entity;
     }
 
@@ -64,6 +92,22 @@ public final class FailureEventEntityMapper {
             return OBJECT_MAPPER.writeValueAsString(payload);
         } catch (JsonProcessingException exception) {
             throw new IllegalArgumentException("Unable to serialize failure event payload", exception);
+        }
+    }
+
+    private static Map<String, Object> fromJson(String rawPayload) {
+        if (rawPayload == null || rawPayload.isBlank()) {
+            return Map.of();
+        }
+
+        try {
+            return OBJECT_MAPPER.readValue(
+                    rawPayload,
+                    new TypeReference<Map<String, Object>>() {});
+        } catch (JsonProcessingException exception) {
+            throw new MalformedRawPayloadException(
+                    "Unable to deserialize persisted failure event payload",
+                    exception);
         }
     }
 }

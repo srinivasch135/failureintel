@@ -2,25 +2,29 @@ package com.failureintel.ingestion.application.service;
 
 import com.failureintel.ingestion.application.exception.DuplicateFailureEventException;
 import com.failureintel.ingestion.domain.model.RawFailureEvent;
-import com.failureintel.ingestion.domain.normalization.FailureEventNormalizer;
-import com.failureintel.ingestion.domain.parser.FailureEventParser;
+import com.failureintel.infrastructure.monitoring.metrics.FailureEventMetrics;
 import com.failureintel.infrastructure.persistence.failureevent.entity.FailureEventEntity;
 import com.failureintel.infrastructure.persistence.failureevent.entity.ProcessingStatus;
+import com.failureintel.infrastructure.persistence.failureevent.mapper.FailureEventEntityMapper;
 import com.failureintel.infrastructure.persistence.failureevent.repository.FailureEventRepository;
-import com.failureintel.infrastructure.persistence.normalizedFailureEvent.repository.NormalizedFailureEventRepository;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.transaction.TransactionSystemException;
 
 import java.sql.SQLException;
+import java.util.Optional;
 
 import static com.failureintel.test.support.FailureEventTestFixtures.validRequest;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.*;
@@ -32,51 +36,35 @@ class FailureEventIngestionServiceTest {
     private FailureEventRepository failureEventRepository;
 
     @Mock
-    private NormalizedFailureEventRepository normalizedFailureEventRepository;
-
-    @Mock
-    private FailureEventParser parser;
-
-    @Mock
-    private FailureEventNormalizer normalizer;
+    private FailureEventMetrics failureEventMetrics;
 
     @Test
-    void shouldPersistParserFailureAsFailedRawEventWithoutNormalizedRow() {
+    void shouldPersistRawFailureEventAsReceived() {
         FailureEventIngestionService service = new FailureEventIngestionService(
-                failureEventRepository,
-                normalizedFailureEventRepository,
-                parser,
-                normalizer);
-        when(parser.supports(any(RawFailureEvent.class))).thenReturn(true);
-        when(parser.parse(any(RawFailureEvent.class)))
-                .thenThrow(new IllegalArgumentException("invalid source format"));
+                failureEventRepository, failureEventMetrics);
         when(failureEventRepository.saveAndFlush(any(FailureEventEntity.class)))
                 .thenAnswer(invocation -> invocation.getArgument(0));
 
-        String eventId = service.ingestFailureEvent(validRequest("trace-parser-failure-001"));
+        String eventId = service.ingestFailureEvent(validRequest("trace-capture-001"));
 
         ArgumentCaptor<FailureEventEntity> captor = ArgumentCaptor.forClass(FailureEventEntity.class);
-        verify(failureEventRepository).saveAndFlush(captor.capture());
-        verifyNoInteractions(normalizedFailureEventRepository);
-        verifyNoInteractions(normalizer);
+        InOrder order = inOrder(failureEventRepository, failureEventMetrics);
+        order.verify(failureEventRepository).saveAndFlush(captor.capture());
 
-        FailureEventEntity failedEvent = captor.getValue();
+        FailureEventEntity rawEvent = captor.getValue();
         assertNotNull(eventId);
-        assertEquals(failedEvent.getEventId().toString(), eventId);
-        assertEquals(ProcessingStatus.FAILED, failedEvent.getProcessingStatus());
-        assertEquals(
-                "Parsing/normalization failed: invalid source format",
-                failedEvent.getFailureReason());
+        assertEquals(rawEvent.getEventId().toString(), eventId);
+        assertEquals(ProcessingStatus.RECEIVED, rawEvent.getProcessingStatus());
+        assertEquals("trace-capture-001", rawEvent.getTraceId());
+        assertNull(rawEvent.getFailureReason());
+        order.verify(failureEventMetrics).recordRawEventAccepted();
+        verify(failureEventMetrics, never()).recordCaptureFailure();
     }
 
     @Test
-    void shouldTrimTraceIdBeforePersistence() {
+    void shouldPreserveTraceIdBeforePersistence() {
         FailureEventIngestionService service = new FailureEventIngestionService(
-                failureEventRepository,
-                normalizedFailureEventRepository,
-                parser,
-                normalizer);
-        when(parser.supports(any(RawFailureEvent.class))).thenReturn(false);
+                failureEventRepository, failureEventMetrics);
         when(failureEventRepository.saveAndFlush(any(FailureEventEntity.class)))
                 .thenAnswer(invocation -> invocation.getArgument(0));
 
@@ -84,48 +72,281 @@ class FailureEventIngestionServiceTest {
 
         ArgumentCaptor<FailureEventEntity> captor = ArgumentCaptor.forClass(FailureEventEntity.class);
         verify(failureEventRepository).saveAndFlush(captor.capture());
-        assertEquals("trace-trimmed-001", captor.getValue().getTraceId());
+        assertEquals("  trace-trimmed-001  ", captor.getValue().getTraceId());
     }
 
     @Test
-    void shouldStoreBlankTraceIdAsNullAndSkipDuplicateCheck() {
+    void shouldPreserveBlankTraceIdAndSkipLegacyDuplicateCheck() {
         FailureEventIngestionService service = new FailureEventIngestionService(
-                failureEventRepository,
-                normalizedFailureEventRepository,
-                parser,
-                normalizer);
-        when(parser.supports(any(RawFailureEvent.class))).thenReturn(false);
+                failureEventRepository, failureEventMetrics);
         when(failureEventRepository.saveAndFlush(any(FailureEventEntity.class)))
                 .thenAnswer(invocation -> invocation.getArgument(0));
 
         service.ingestFailureEvent(validRequest("   "));
 
         ArgumentCaptor<FailureEventEntity> captor = ArgumentCaptor.forClass(FailureEventEntity.class);
-        verify(failureEventRepository, never()).existsByTraceId(any());
         verify(failureEventRepository).saveAndFlush(captor.capture());
-        assertNull(captor.getValue().getTraceId());
+        assertEquals("   ", captor.getValue().getTraceId());
     }
 
     @Test
-    void shouldTranslateConcurrentTraceIdConstraintViolation() {
+    void shouldPersistDistinctEventsWithSameTraceWhenNoExplicitKeyIsProvided() {
         FailureEventIngestionService service = new FailureEventIngestionService(
-                failureEventRepository,
-                normalizedFailureEventRepository,
-                parser,
-                normalizer);
-        when(parser.supports(any(RawFailureEvent.class))).thenReturn(false);
+                failureEventRepository, failureEventMetrics);
+        when(failureEventRepository.saveAndFlush(any(FailureEventEntity.class)))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+
+        String firstEventId = service.ingestFailureEvent(validRequest("trace-reused-001"));
+        String secondEventId = service.ingestFailureEvent(validRequest("trace-reused-001"));
+
+        assertNotNull(firstEventId);
+        assertNotNull(secondEventId);
+        assertNotEquals(firstEventId, secondEventId);
+        verify(failureEventRepository, times(2)).saveAndFlush(any(FailureEventEntity.class));
+    }
+
+    @Test
+    void shouldResolveEquivalentRetryForLegacyTraceBasedRow() {
+        FailureEventIngestionService service = new FailureEventIngestionService(
+                failureEventRepository, failureEventMetrics);
+        var request = validRequest("trace-legacy-001");
+        RawFailureEvent existingRaw = new RawFailureEvent(
+                java.util.UUID.randomUUID(),
+                request.getServerName(),
+                request.getServiceName(),
+                request.getEnvironment(),
+                request.getEventType(),
+                request.getErrorType(),
+                request.getErrorMessage(),
+                request.getDependencyTarget(),
+                request.getTraceId(),
+                request.getSeverityHint(),
+                request.getOccurredAt(),
+                java.time.Instant.now(),
+                request.getRawPayload(),
+                java.util.Map.of());
+        FailureEventEntity existing = FailureEventEntityMapper.fromRaw(existingRaw);
+        existing.setIdempotencyKey("trace:trace-legacy-001");
+        existing.setIngestionFingerprint(FailureEventFingerprint.calculate(existingRaw));
+        when(failureEventRepository.findByIdempotencyKey("trace:trace-legacy-001"))
+                .thenReturn(Optional.of(existing));
+
+        assertEquals(existing.getEventId().toString(), service.ingestFailureEvent(request));
+        verify(failureEventRepository, never()).saveAndFlush(any(FailureEventEntity.class));
+        verify(failureEventMetrics, never()).recordRawEventAccepted();
+        verify(failureEventMetrics, never()).recordCaptureFailure();
+    }
+
+    @Test
+    void shouldPersistNewEventWhenLegacyTraceRowHasDifferentContent() {
+        FailureEventIngestionService service = new FailureEventIngestionService(
+                failureEventRepository, failureEventMetrics);
+        var request = validRequest("trace-legacy-conflict-001");
+        RawFailureEvent existingRaw = new RawFailureEvent(
+                java.util.UUID.randomUUID(),
+                request.getServerName(),
+                request.getServiceName(),
+                request.getEnvironment(),
+                request.getEventType(),
+                request.getErrorType(),
+                "different message",
+                request.getDependencyTarget(),
+                request.getTraceId(),
+                request.getSeverityHint(),
+                request.getOccurredAt(),
+                java.time.Instant.now(),
+                request.getRawPayload(),
+                java.util.Map.of());
+        FailureEventEntity existing = FailureEventEntityMapper.fromRaw(existingRaw);
+        existing.setIdempotencyKey("trace:trace-legacy-conflict-001");
+        existing.setIngestionFingerprint(FailureEventFingerprint.calculate(existingRaw));
+        when(failureEventRepository.findByIdempotencyKey("trace:trace-legacy-conflict-001"))
+                .thenReturn(Optional.of(existing));
+        when(failureEventRepository.saveAndFlush(any(FailureEventEntity.class)))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+
+        String newEventId = service.ingestFailureEvent(request);
+
+        assertNotEquals(existing.getEventId().toString(), newEventId);
+        verify(failureEventRepository).saveAndFlush(any(FailureEventEntity.class));
+        verify(failureEventMetrics).recordRawEventAccepted();
+        verify(failureEventMetrics, never()).recordCaptureFailure();
+    }
+
+    @Test
+    void shouldResolveConcurrentEquivalentIdempotencyKeyViolation() {
+        FailureEventIngestionService service = new FailureEventIngestionService(
+                failureEventRepository, failureEventMetrics);
+        var request = validRequest("trace-race-001");
+        request.setIdempotencyKey("idempotency-race-001");
+        var existingRaw = new RawFailureEvent(
+                java.util.UUID.randomUUID(),
+                request.getServerName(),
+                request.getServiceName(),
+                request.getEnvironment(),
+                request.getEventType(),
+                request.getErrorType(),
+                request.getErrorMessage(),
+                request.getDependencyTarget(),
+                request.getTraceId(),
+                request.getSeverityHint(),
+                request.getOccurredAt(),
+                java.time.Instant.now(),
+                request.getRawPayload(),
+                java.util.Map.of());
+        FailureEventEntity existing = FailureEventEntityMapper.fromRaw(existingRaw);
+        existing.setIdempotencyKey("key:idempotency-race-001");
+        existing.setIngestionFingerprint(FailureEventFingerprint.calculate(existingRaw));
+        when(failureEventRepository.findByIdempotencyKey("key:idempotency-race-001"))
+                .thenReturn(Optional.empty())
+                .thenReturn(Optional.of(existing));
         SQLException uniqueViolation = new SQLException(
-                "duplicate key violates unique constraint uq_failure_event_trace_id",
+                "duplicate key violates unique constraint uq_failure_event_idempotency_key",
                 "23505");
         when(failureEventRepository.saveAndFlush(any(FailureEventEntity.class)))
                 .thenThrow(new DataIntegrityViolationException("duplicate trace ID", uniqueViolation));
 
+        assertEquals(existing.getEventId().toString(), service.ingestFailureEvent(request));
+        verify(failureEventMetrics, never()).recordRawEventAccepted();
+        verify(failureEventMetrics, never()).recordCaptureFailure();
+    }
+
+    @Test
+    void shouldRejectExplicitIdempotencyKeyWhenContentDiffers() {
+        FailureEventIngestionService service = new FailureEventIngestionService(
+                failureEventRepository, failureEventMetrics);
+        var request = validRequest("trace-conflict-001");
+        request.setIdempotencyKey("idempotency-conflict-001");
+        FailureEventEntity existing = FailureEventEntityMapper.fromRaw(new RawFailureEvent(
+                java.util.UUID.randomUUID(),
+                request.getServerName(),
+                request.getServiceName(),
+                request.getEnvironment(),
+                request.getEventType(),
+                request.getErrorType(),
+                "different message",
+                request.getDependencyTarget(),
+                request.getTraceId(),
+                request.getSeverityHint(),
+                request.getOccurredAt(),
+                java.time.Instant.now(),
+                request.getRawPayload(),
+                java.util.Map.of()));
+        existing.setIdempotencyKey("key:idempotency-conflict-001");
+        existing.setIngestionFingerprint(FailureEventFingerprint.calculate(
+                FailureEventEntityMapper.toRaw(existing)));
+        when(failureEventRepository.findByIdempotencyKey("key:idempotency-conflict-001"))
+                .thenReturn(Optional.of(existing));
+
         DuplicateFailureEventException exception = assertThrows(
                 DuplicateFailureEventException.class,
-                () -> service.ingestFailureEvent(validRequest("trace-race-001")));
+                () -> service.ingestFailureEvent(request));
 
         assertEquals(
-                "Failure event already exists for traceId: trace-race-001",
+                "Failure event already exists for idempotency key: idempotency-conflict-001",
                 exception.getMessage());
+        verify(failureEventMetrics, never()).recordRawEventAccepted();
+        verify(failureEventMetrics, never()).recordCaptureFailure();
+    }
+
+    @Test
+    void shouldNotCountEquivalentExplicitIdempotencyRetryAsNewAcceptance() {
+        FailureEventIngestionService service = new FailureEventIngestionService(
+                failureEventRepository, failureEventMetrics);
+        var request = validRequest("trace-explicit-idempotent-001");
+        request.setIdempotencyKey("explicit-idempotency-001");
+        RawFailureEvent existingRaw = new RawFailureEvent(
+                java.util.UUID.randomUUID(),
+                request.getServerName(),
+                request.getServiceName(),
+                request.getEnvironment(),
+                request.getEventType(),
+                request.getErrorType(),
+                request.getErrorMessage(),
+                request.getDependencyTarget(),
+                request.getTraceId(),
+                request.getSeverityHint(),
+                request.getOccurredAt(),
+                java.time.Instant.now(),
+                request.getRawPayload(),
+                java.util.Map.of());
+        FailureEventEntity existing = FailureEventEntityMapper.fromRaw(existingRaw);
+        existing.setIdempotencyKey("key:explicit-idempotency-001");
+        existing.setIngestionFingerprint(FailureEventFingerprint.calculate(existingRaw));
+        when(failureEventRepository.findByIdempotencyKey("key:explicit-idempotency-001"))
+                .thenReturn(Optional.of(existing));
+
+        assertEquals(existing.getEventId().toString(), service.ingestFailureEvent(request));
+
+        verify(failureEventRepository, never()).saveAndFlush(any(FailureEventEntity.class));
+        verify(failureEventMetrics, never()).recordRawEventAccepted();
+        verify(failureEventMetrics, never()).recordCaptureFailure();
+    }
+
+    @Test
+    void shouldRecordCaptureFailureAndPreserveUnexpectedPersistenceException() {
+        FailureEventIngestionService service = new FailureEventIngestionService(
+                failureEventRepository, failureEventMetrics);
+        var request = validRequest("trace-persistence-failure-001");
+        IllegalStateException persistenceFailure = new IllegalStateException("database unavailable");
+        when(failureEventRepository.saveAndFlush(any(FailureEventEntity.class)))
+                .thenThrow(persistenceFailure);
+
+        IllegalStateException thrown = assertThrows(
+                IllegalStateException.class, () -> service.ingestFailureEvent(request));
+
+        assertSame(persistenceFailure, thrown);
+        verify(failureEventMetrics, never()).recordRawEventAccepted();
+        verify(failureEventMetrics).recordCaptureFailure();
+    }
+
+    @Test
+    void shouldRecordCaptureFailureWhenSaveTransactionCommitFails() {
+        FailureEventIngestionService service = new FailureEventIngestionService(
+                failureEventRepository, failureEventMetrics);
+        var request = validRequest("trace-commit-failure-001");
+        TransactionSystemException commitFailure = new TransactionSystemException("transaction commit failed");
+        when(failureEventRepository.saveAndFlush(any(FailureEventEntity.class)))
+                .thenThrow(commitFailure);
+
+        TransactionSystemException thrown = assertThrows(
+                TransactionSystemException.class, () -> service.ingestFailureEvent(request));
+
+        assertSame(commitFailure, thrown);
+        verify(failureEventMetrics, never()).recordRawEventAccepted();
+        verify(failureEventMetrics).recordCaptureFailure();
+    }
+
+    @Test
+    void shouldPreserveCaptureExceptionIfMetricRecordingAlsoFails() {
+        FailureEventIngestionService service = new FailureEventIngestionService(
+                failureEventRepository, failureEventMetrics);
+        IllegalStateException persistenceFailure = new IllegalStateException("database unavailable");
+        when(failureEventRepository.saveAndFlush(any(FailureEventEntity.class)))
+                .thenThrow(persistenceFailure);
+        doThrow(new IllegalStateException("metrics unavailable"))
+                .when(failureEventMetrics).recordCaptureFailure();
+
+        IllegalStateException thrown = assertThrows(
+                IllegalStateException.class, () -> service.ingestFailureEvent(validRequest("trace-metric-error")));
+
+        assertSame(persistenceFailure, thrown);
+        assertEquals(1, thrown.getSuppressed().length);
+        assertEquals("metrics unavailable", thrown.getSuppressed()[0].getMessage());
+    }
+
+    @Test
+    void shouldNotTurnCommittedCaptureIntoFailureWhenAcceptanceMetricRecordingFails() {
+        FailureEventIngestionService service = new FailureEventIngestionService(
+                failureEventRepository, failureEventMetrics);
+        when(failureEventRepository.saveAndFlush(any(FailureEventEntity.class)))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+        doThrow(new IllegalStateException("metrics unavailable"))
+                .when(failureEventMetrics).recordRawEventAccepted();
+
+        String eventId = service.ingestFailureEvent(validRequest("trace-metric-acceptance-error"));
+
+        assertNotNull(eventId);
+        verify(failureEventMetrics, never()).recordCaptureFailure();
     }
 }

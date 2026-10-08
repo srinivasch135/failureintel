@@ -30,6 +30,7 @@ spring:
     enabled: true
     out-of-order: false
     validate-on-migrate: true
+    connect-retries: ${SPRING_FLYWAY_CONNECT_RETRIES:5}
 
 logging:
   level:
@@ -51,3 +52,23 @@ management:
 server:
   port: ${SERVER_PORT:8081}
   shutdown: graceful
+  tomcat:
+    max-http-form-post-size: 1MB
+    max-swallow-size: 1MB
+
+failure-event:
+  ingestion:
+    max-request-size-bytes: ${FAILURE_EVENT_MAX_REQUEST_SIZE_BYTES:1048576}
+  processing:
+    worker:
+      enabled: ${FAILURE_EVENT_WORKER_ENABLED:false}
+      fixed-delay: ${FAILURE_EVENT_WORKER_FIXED_DELAY:2s}
+      recovery-scan-interval: ${FAILURE_EVENT_RECOVERY_SCAN_INTERVAL:30s}
+      batch-size: ${FAILURE_EVENT_WORKER_BATCH_SIZE:8}
+      concurrency: ${FAILURE_EVENT_WORKER_CONCURRENCY:2}
+      shutdown-await: ${FAILURE_EVENT_WORKER_SHUTDOWN_AWAIT:30s}
+      processing-lease-timeout: ${FAILURE_EVENT_PROCESSING_LEASE_TIMEOUT:5m}
+    retry:
+      max-attempts: ${FAILURE_EVENT_RETRY_MAX_ATTEMPTS:5}
+      delays: ${FAILURE_EVENT_RETRY_DELAYS:PT1M,PT5M,PT30M,PT2H}
+      jitter-fraction: ${FAILURE_EVENT_RETRY_JITTER_FRACTION:0.2}

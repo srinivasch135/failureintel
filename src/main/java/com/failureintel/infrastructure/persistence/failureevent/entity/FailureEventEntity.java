@@ -1,6 +1,11 @@
 package com.failureintel.infrastructure.persistence.failureevent.entity;
 
 import jakarta.persistence.*;
+import org.hibernate.annotations.JdbcTypeCode;
+import org.hibernate.type.SqlTypes;
+
+import java.util.Map;
+import java.util.Objects;
 
 import java.time.Instant;
 import java.util.UUID;
@@ -9,9 +14,16 @@ import java.util.UUID;
 @Table(name = "failure_event")
 public class FailureEventEntity {
 
+    private static final String RETRY_EXHAUSTED_CODE = "RETRY_EXHAUSTED";
+
     @Id
     @Column(name = "event_id", nullable = false, updatable = false)
     private UUID eventId;
+
+    @Version
+    @Column(name = "version", nullable = false)
+    private Long version;
+
     @Column(name = "occurred_at", nullable = false)
     private Instant occurredAt;
     @Column(name = "failure_type")
@@ -34,6 +46,10 @@ public class FailureEventEntity {
     private String dependencyTarget;
     @Column(name = "trace_id", length = 120)
     private String traceId;
+    @Column(name = "idempotency_key", length = 255)
+    private String idempotencyKey;
+    @Column(name = "ingestion_fingerprint", length = 67)
+    private String ingestionFingerprint;
     @Column(name = "severity_hint", length = 50)
     private String severityHint;
     @Column(name = "raw_payload", columnDefinition = "TEXT")
@@ -41,6 +57,19 @@ public class FailureEventEntity {
     @Column(name = "processing_status", nullable = false, length = 20)
     @Enumerated(EnumType.STRING)
     private ProcessingStatus processingStatus;
+    @JdbcTypeCode(SqlTypes.JSON)
+    @Column(name = "source_metadata", columnDefinition = "jsonb")
+    private Map<String, Object> sourceMetadata;
+    @Column(name = "attempt_count", nullable = false)
+    private Integer attemptCount;
+    @Column(name = "last_attempt_at")
+    private Instant lastAttemptAt;
+    @Column(name = "next_attempt_at")
+    private Instant nextAttemptAt;
+    @Column(name = "processing_started_at")
+    private Instant processingStartedAt;
+    @Column(name = "failure_code", length = 80)
+    private String failureCode;
     @Column(name = "failure_reason", columnDefinition = "TEXT")
     private String failureReason;
     @Column(name = "incident_id")
@@ -53,6 +82,9 @@ public class FailureEventEntity {
         }
         if (this.processingStatus == null) {
             this.processingStatus = ProcessingStatus.RECEIVED;
+        }
+        if (this.attemptCount == null) {
+            this.attemptCount = 0;
         }
     }
 
@@ -144,6 +176,22 @@ public class FailureEventEntity {
         this.traceId = traceId;
     }
 
+    public String getIdempotencyKey() {
+        return idempotencyKey;
+    }
+
+    public void setIdempotencyKey(String idempotencyKey) {
+        this.idempotencyKey = idempotencyKey;
+    }
+
+    public String getIngestionFingerprint() {
+        return ingestionFingerprint;
+    }
+
+    public void setIngestionFingerprint(String ingestionFingerprint) {
+        this.ingestionFingerprint = ingestionFingerprint;
+    }
+
     public String getSeverityHint() {
         return severityHint;
     }
@@ -182,6 +230,151 @@ public class FailureEventEntity {
 
     public void setIncidentId(UUID incidentId) {
         this.incidentId = incidentId;
+    }
+
+    public Map<String, Object> getSourceMetadata() {
+        return sourceMetadata;
+    }
+
+    public void setSourceMetadata(Map<String, Object> sourceMetadata) {
+        this.sourceMetadata = sourceMetadata;
+    }
+
+    public Integer getAttemptCount() {
+        return attemptCount;
+    }
+
+    void setAttemptCount(Integer attemptCount) {
+        this.attemptCount = attemptCount;
+    }
+
+    public Instant getLastAttemptAt() {
+        return lastAttemptAt;
+    }
+
+    void setLastAttemptAt(Instant lastAttemptAt) {
+        this.lastAttemptAt = lastAttemptAt;
+    }
+
+    public Instant getNextAttemptAt() {
+        return nextAttemptAt;
+    }
+
+    void setNextAttemptAt(Instant nextAttemptAt) {
+        this.nextAttemptAt = nextAttemptAt;
+    }
+
+    public Instant getProcessingStartedAt() {
+        return processingStartedAt;
+    }
+
+    void setProcessingStartedAt(Instant processingStartedAt) {
+        this.processingStartedAt = processingStartedAt;
+    }
+
+    public String getFailureCode() {
+        return failureCode;
+    }
+
+    void setFailureCode(String failureCode) {
+        this.failureCode = failureCode;
+    }
+
+    public void claimForProcessing(Instant attemptStartedAt) {
+        Objects.requireNonNull(attemptStartedAt, "attemptStartedAt must not be null");
+        requireStatus(ProcessingStatus.RECEIVED, ProcessingStatus.RETRYABLE);
+
+        int currentAttemptCount = attemptCount == null ? 0 : attemptCount;
+        if (currentAttemptCount < 0) {
+            throw new IllegalStateException("attemptCount must not be negative");
+        }
+
+        this.processingStatus = ProcessingStatus.PROCESSING;
+        this.attemptCount = Math.incrementExact(currentAttemptCount);
+        this.lastAttemptAt = attemptStartedAt;
+        this.processingStartedAt = attemptStartedAt;
+        this.nextAttemptAt = null;
+        this.failureCode = null;
+        this.failureReason = null;
+    }
+
+    public void markNormalized() {
+        requireStatus(ProcessingStatus.PROCESSING);
+
+        this.processingStatus = ProcessingStatus.NORMALIZED;
+        this.processingStartedAt = null;
+        this.nextAttemptAt = null;
+        this.failureCode = null;
+        this.failureReason = null;
+    }
+
+    public void markRetryable(String failureCode, String failureReason, Instant nextAttemptAt) {
+        requireFailureDetails(failureCode, failureReason);
+        Objects.requireNonNull(nextAttemptAt, "nextAttemptAt must not be null");
+        requireStatus(ProcessingStatus.PROCESSING);
+
+        this.processingStatus = ProcessingStatus.RETRYABLE;
+        this.processingStartedAt = null;
+        this.nextAttemptAt = nextAttemptAt;
+        this.failureCode = failureCode.trim();
+        this.failureReason = failureReason.trim();
+    }
+
+    public void markFailed(String failureCode, String failureReason) {
+        requireFailureDetails(failureCode, failureReason);
+        requireStatus(ProcessingStatus.PROCESSING);
+
+        this.processingStatus = ProcessingStatus.FAILED;
+        this.processingStartedAt = null;
+        this.nextAttemptAt = null;
+        this.failureCode = failureCode.trim();
+        this.failureReason = failureReason.trim();
+    }
+
+    public void markRetryExhausted(String lastFailureCode, String lastFailureReason) {
+        requireFailureDetails(lastFailureCode, lastFailureReason);
+        requireStatus(ProcessingStatus.PROCESSING, ProcessingStatus.RETRYABLE);
+
+        this.processingStatus = ProcessingStatus.FAILED;
+        this.processingStartedAt = null;
+        this.nextAttemptAt = null;
+        this.failureCode = RETRY_EXHAUSTED_CODE;
+        this.failureReason = "Automatic retries exhausted after "
+                + lastFailureCode.trim()
+                + ": "
+                + lastFailureReason.trim();
+    }
+
+    public void recoverExpiredLease(String failureCode, String failureReason, Instant nextAttemptAt) {
+        requireFailureDetails(failureCode, failureReason);
+        Objects.requireNonNull(nextAttemptAt, "nextAttemptAt must not be null");
+        requireStatus(ProcessingStatus.PROCESSING);
+
+        this.processingStatus = ProcessingStatus.RETRYABLE;
+        this.processingStartedAt = null;
+        this.nextAttemptAt = nextAttemptAt;
+        this.failureCode = failureCode.trim();
+        this.failureReason = failureReason.trim();
+    }
+
+    private void requireStatus(ProcessingStatus... allowedStatuses) {
+        for (ProcessingStatus allowedStatus : allowedStatuses) {
+            if (this.processingStatus == allowedStatus) {
+                return;
+            }
+        }
+
+        throw new IllegalStateException(
+                "Cannot transition failure event from status " + this.processingStatus);
+    }
+
+    private void requireFailureDetails(String failureCode, String failureReason) {
+        if (failureCode == null || failureCode.isBlank()) {
+            throw new IllegalArgumentException("failureCode must not be blank");
+        }
+        if (failureReason == null || failureReason.isBlank()) {
+            throw new IllegalArgumentException("failureReason must not be blank");
+        }
     }
 
 }

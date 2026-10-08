@@ -157,6 +157,7 @@ The API performs only validation required to store the request safely:
 - request body is syntactically valid JSON;
 - request does not exceed the configured size limit;
 - values do not violate storage/security limits;
+- bounded string fields fit their raw-table column limits;
 - the raw payload can be represented by the persistence model.
 
 Business completeness is evaluated during processing, not raw capture. A syntactically valid but semantically incomplete failure event should normally be retained and later marked `FAILED`.
@@ -191,26 +192,32 @@ Invalid JSON returns `400`. An oversized body returns `413`. Such requests are o
 
 ## 8. Idempotent ingestion
 
-`existsByTraceId()` followed by an insert is not concurrency-safe. Enforce idempotency at the database boundary.
+`traceId` is a correlation identifier for the distributed request flow and is not unique. A single trace can legitimately contain multiple failure events. Enforce idempotency with a separate producer-supplied `Idempotency-Key` (or source event ID) at the database boundary.
 
 After auditing and resolving existing duplicate values, add a partial unique index:
 
 ```sql
-CREATE UNIQUE INDEX uq_failure_event_trace_id
-    ON failure_event(trace_id)
-    WHERE trace_id IS NOT NULL
-      AND trace_id <> '';
+CREATE UNIQUE INDEX uq_failure_event_idempotency_key
+    ON failure_event(idempotency_key)
+    WHERE idempotency_key IS NOT NULL
+      AND BTRIM(idempotency_key) <> '';
 ```
 
 Target behavior:
 
-- same trace ID and equivalent payload: return the existing event ID;
-- same trace ID and materially different payload: return `409 Conflict`;
-- no trace ID: accept with a generated event ID, but exactly-once client retry behavior is not guaranteed.
+- same idempotency key and equivalent raw content: return the existing event ID;
+- same idempotency key and materially different raw content: return `409 Conflict`;
+- different idempotency key with the same trace ID: create a new event;
+- no idempotency key: accept a new event, but exactly-once client retry behavior is not guaranteed.
 
-A deterministic payload hash may be stored to distinguish an idempotent retry from conflicting reuse of the same trace ID.
+For compatibility with rows created before explicit idempotency keys were introduced,
+a no-key retry may resolve to an existing `trace:<traceId>` row only when its raw
+content fingerprint is equivalent. A conflicting event with the same trace ID is
+persisted as a new raw event and is not rejected because of the trace ID.
 
-The database unique index is the final concurrency guard. If two inserts race, handle the unique-constraint failure by loading the existing row and applying the behavior above.
+A deterministic fingerprint of the raw content should be stored to distinguish an idempotent retry from conflicting reuse of the same idempotency key. The fingerprint excludes generated identity, ingestion time, processing state, normalized fields, and trace ID.
+
+The database unique index is the final concurrency guard. If two inserts race, allow the losing write transaction to end, reload the winner in a fresh transaction, and apply the fingerprint comparison above.
 
 ## 9. Transaction boundaries and component ownership
 
@@ -362,7 +369,9 @@ Store only a bounded, sanitized reason. Log the full exception and stack trace w
 
 ## 13. Retry policy
 
-Initial defaults:
+Approved Task 10 policy (Checkpoint 0, 2026-09-24):
+
+`attempt_count` is incremented when the event is claimed. The first claim is attempt 1; the limit is five total claims. A failure after attempts 1 through 4 is eligible for retry using this schedule:
 
 | Failed attempt | Base delay |
 |---:|---:|
@@ -370,24 +379,31 @@ Initial defaults:
 | 2 | 5 minutes |
 | 3 | 30 minutes |
 | 4 | 2 hours |
-| 5 | 12 hours |
 
-After the configured maximum attempt count, transition to `FAILED` with failure code `RETRY_EXHAUSTED` while preserving the most recent sanitized cause.
+Apply bounded random jitter of up to plus or minus 20 percent of the selected base delay. The resulting `next_attempt_at` must be in the future. After attempt 5 fails with a retryable failure, transition to `FAILED` with failure code `RETRY_EXHAUSTED`, preserve the last sanitized cause, and do not schedule another attempt. Permanent data failures retain their specific failure code and become `FAILED` immediately.
 
-Add bounded random jitter to each base delay to avoid synchronized retry spikes. Make the maximum attempts, delays, worker interval, batch size, and lease timeout external configuration.
+Normalized-event persistence failures use stable failure code `NORMALIZED_WRITE_FAILURE` and are retryable under this policy, including deterministic constraint failures. They therefore reach `RETRY_EXHAUSTED` after the fifth failed claim unless a retry succeeds. Make the maximum attempts, delays, and jitter bound external configuration under the existing `failure-event` configuration namespace. Use an injected clock and controlled jitter source so retry-time calculation can be tested without wall-clock sleeps.
 
 ## 14. Crash and lease recovery
 
-An event is abandoned when:
+An event is abandoned when it is still `PROCESSING` and its lease timestamp is at or before the expiry cutoff (the boundary is inclusive):
 
 ```text
 processing_status = PROCESSING
-AND processing_started_at < now() - processing_lease_timeout
+AND lease_timestamp <= now - processing_lease_timeout
 ```
 
-Recovery transitions it to `RETRYABLE`, schedules the next attempt, clears `processing_started_at`, and records `WORKER_LEASE_EXPIRED`. If the already-incremented attempt count has reached the maximum, recovery transitions it to `FAILED`.
+`lease_timestamp` is selected in this order: `processing_started_at`, then `last_attempt_at`, then `ingested_at`. A fallback timestamp must also be at or before the expiry cutoff. A row with no reliable timestamp is inconsistent and must be surfaced for investigation, not immediately recovered. In the current schema `ingested_at` is non-null, so the final fallback is normally available.
 
-The lease timeout must be longer than the expected maximum time for one parse-and-normalize attempt. Recovery must be idempotent and safe to run on every application instance using row locking.
+The timeout and scan interval have different meanings: the timeout determines when a claim is expired; the scan interval determines how often recovery looks for expired claims. Recovery must have an independent scheduling opportunity so a processing batch waiting on a task cannot prevent recovery from running. Reuse the worker batch size for recovery unless measurements show a separate size is necessary.
+
+Claim timestamps and expiry cutoffs use PostgreSQL's transaction timestamp as the shared time authority across application instances. The expiry predicate is inclusive (`<=`). The existing retry policy remains responsible for calculating `next_attempt_at` after recovery.
+
+Recovery does not increment `attempt_count`: the claim already incremented it. If the count is below the configured maximum, recovery changes `PROCESSING` to `RETRYABLE`, applies the existing retry backoff, clears `processing_started_at`, and records `WORKER_LEASE_EXPIRED`. If the count has reached the maximum, recovery changes `PROCESSING` to `FAILED` and clears retry and lease timestamps.
+
+The recovery transaction is short: lock a bounded set of candidates with `FOR UPDATE SKIP LOCKED`, apply the transitions, and commit. It does not parse or normalize. A crash before commit leaves the rows available for a later scan. Optimistic `@Version` and the claim attempt check prevent a late worker from overwriting recovery or a newer attempt.
+
+The lease timeout must exceed the expected maximum processing duration, including time a claimed event may wait in the bounded executor queue. Recovery must be idempotent and safe to run on every application instance using row locking.
 
 ## 15. Database changes
 
@@ -399,7 +415,8 @@ Required or recommended raw-table columns:
 ALTER TABLE failure_event
     ADD COLUMN IF NOT EXISTS source_system VARCHAR(255),
     ADD COLUMN IF NOT EXISTS source_metadata JSONB,
-    ADD COLUMN IF NOT EXISTS payload_hash VARCHAR(64),
+    ADD COLUMN IF NOT EXISTS idempotency_key VARCHAR(255),
+    ADD COLUMN IF NOT EXISTS ingestion_fingerprint VARCHAR(67),
     ADD COLUMN IF NOT EXISTS attempt_count INTEGER NOT NULL DEFAULT 0,
     ADD COLUMN IF NOT EXISTS last_attempt_at TIMESTAMP,
     ADD COLUMN IF NOT EXISTS next_attempt_at TIMESTAMP,
@@ -418,7 +435,7 @@ CREATE INDEX IF NOT EXISTS idx_failure_event_processing_queue
     );
 ```
 
-Also add the trace-ID unique index described in the idempotency section after auditing duplicates.
+Add the idempotency-key unique index described in the idempotency section after auditing existing data. Do not add a uniqueness constraint to `trace_id`.
 
 Before finalizing the migration, reconcile the existing `server_name` column with the target `source_system` name. Do not maintain two authoritative columns for the same value.
 
@@ -556,8 +573,9 @@ The checkpoint is not complete until automated tests prove:
 9. One failed event does not roll back other events in a claimed batch.
 10. An expired `PROCESSING` lease becomes `RETRYABLE` or `FAILED` at the attempt limit.
 11. Retry delays and maximum-attempt handling are deterministic under a fixed clock.
-12. Concurrent identical trace IDs produce one raw event.
-13. Conflicting reuse of a trace ID returns `409`.
+12. Concurrent requests with the same explicit idempotency key produce one raw event.
+13. Distinct events sharing a trace ID are both preserved; an equivalent retry of a
+    legacy `trace:<traceId>` row resolves to that row.
 14. Restarting the application does not lose `RECEIVED` or `RETRYABLE` work.
 15. Read-by-ID works before normalization and after permanent failure.
 
