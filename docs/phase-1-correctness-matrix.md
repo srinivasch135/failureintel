@@ -1,6 +1,6 @@
 # Phase 1 Normalization Correctness Matrix
 
-This document is the executable correctness contract for the synchronous ingestion pipeline before Kafka is introduced.
+Historical Phase 1 baseline: this document records the executable correctness contract for the synchronous ingestion pipeline before Kafka was introduced.
 
 ## Status contract
 
@@ -51,3 +51,6 @@ Verified on 2026-08-25 with two consecutive complete Maven test runs.
 | 98 | 0 | 0 | 0 | Passed twice |
 
 The database-backed tests use isolated PostgreSQL Testcontainers, so verification does not read from or modify the developer database.
+# Historical baseline notice
+
+This document records the Phase 1 correctness baseline and historical behavior. The old row describing a normalized-write failure rolling back the raw insert is superseded by the current durable-ingestion contract: raw capture commits first, and later asynchronous normalization failure preserves the raw event for retry or investigation. Use the durable-ingestion architecture document and current integration tests as the source of truth for the active pipeline.
