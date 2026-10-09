@@ -535,7 +535,9 @@ Logs for all processing paths must include `eventId`, `traceId` when present, at
 - Define retention and archival policies separately for raw and normalized data.
 - Preserve enough raw information for replay without requiring the original producer.
 
-## 21. Deployment plan
+## 21. Historical deployment proposal — superseded
+
+The sequence below is retained as the original proposal, not as the current deployment instruction. In particular, “Retain current synchronous behavior temporarily” predates the implemented durable raw-capture pipeline and must not be interpreted as the current contract. For the present release boundary and production gates, use `docs/task-15-checkpoint-15-1-release-readiness.md` and the Task 15 two-checkpoint rollout: compatibility with the worker disabled, then deliberate activation of asynchronous processing.
 
 ### Checkpoint 1: compatibility release
 
