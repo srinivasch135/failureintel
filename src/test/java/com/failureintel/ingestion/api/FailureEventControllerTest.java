@@ -14,6 +14,7 @@ import org.springframework.data.domain.PageImpl;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 import org.springframework.dao.DataAccessResourceFailureException;
+import org.springframework.http.MediaType;
 import org.springframework.data.web.PageableHandlerMethodArgumentResolver;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
@@ -135,6 +136,50 @@ class FailureEventControllerTest {
                 .content(validIngestionRequest("trace-capture-failure-001")))
                 .andExpect(status().isInternalServerError())
                 .andExpect(jsonPath("$.error").value("DATABASE_ERROR"));
+    }
+
+    @Test
+    void shouldReturnUnsupportedMediaTypeContractForNonJsonContentType() throws Exception {
+        mockMvc.perform(post("/api/v1/failure-events")
+                        .contentType(MediaType.TEXT_PLAIN)
+                        .content("{}"))
+                .andExpect(status().isUnsupportedMediaType())
+                .andExpect(jsonPath("$.status").value(415))
+                .andExpect(jsonPath("$.error").value("MEDIA_TYPE_NOT_SUPPORTED"))
+                .andExpect(jsonPath("$.message").value("Content-Type not supported: text/plain"))
+                .andExpect(jsonPath("$.path").value("/api/v1/failure-events"));
+
+        org.mockito.Mockito.verifyNoInteractions(ingestFailureEventUseCase);
+    }
+
+    @Test
+    void shouldKeepMissingContentTypeAsUnsupportedMediaType() throws Exception {
+        mockMvc.perform(post("/api/v1/failure-events")
+                        .content("{}"))
+                .andExpect(status().isUnsupportedMediaType())
+                .andExpect(jsonPath("$.status").value(415))
+                .andExpect(jsonPath("$.error").value("MEDIA_TYPE_NOT_SUPPORTED"));
+
+        org.mockito.Mockito.verifyNoInteractions(ingestFailureEventUseCase);
+    }
+
+    @Test
+    void shouldPreserveValidJsonAndGenericInternalServerErrorHandling() throws Exception {
+        UUID eventId = UUID.randomUUID();
+        when(ingestFailureEventUseCase.ingestFailureEvent(isA(FailureEventIngestionRequest.class)))
+                .thenReturn(eventId.toString());
+
+        mockMvc.perform(post("/api/v1/failure-events")
+                        .contentType(APPLICATION_JSON)
+                        .content(validIngestionRequest("trace-media-json-001")))
+                .andExpect(status().isAccepted())
+                .andExpect(jsonPath("$.eventId").value(eventId.toString()));
+
+        when(failureEventQueryService.getFailureEvent(isA(UUID.class)))
+                .thenThrow(new IllegalStateException("unexpected failure"));
+        mockMvc.perform(get("/api/v1/failure-events/{eventId}", UUID.randomUUID()))
+                .andExpect(status().isInternalServerError())
+                .andExpect(jsonPath("$.error").value("INTERNAL_SERVER_ERROR"));
     }
 
     @Test
