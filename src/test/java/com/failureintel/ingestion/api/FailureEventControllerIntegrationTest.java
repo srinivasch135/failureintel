@@ -458,6 +458,15 @@ class FailureEventControllerIntegrationTest {
     }
 
     @Test
+    void shouldReturnNotFoundForUnmappedRoute() throws Exception {
+        mockMvc.perform(get("/"))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.status").value(404))
+                .andExpect(jsonPath("$.error").value("RESOURCE_NOT_FOUND"))
+                .andExpect(jsonPath("$.path").value("/"));
+    }
+
+    @Test
     void shouldReturnFailureEventByTraceIdFromDatabase() throws Exception {
         String eventId = ingestionService.ingestFailureEvent(validRequest());
 
