@@ -19,6 +19,7 @@ import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.method.annotation.HandlerMethodValidationException;
 import org.springframework.web.bind.MissingServletRequestParameterException;
 import org.springframework.web.HttpRequestMethodNotSupportedException;
+import org.springframework.web.HttpMediaTypeNotSupportedException;
 
 @RestControllerAdvice
 public class GlobalExceptionHandler {
@@ -165,6 +166,24 @@ public class GlobalExceptionHandler {
 
                 return build(HttpStatus.METHOD_NOT_ALLOWED,
                                 "METHOD_NOT_SUPPORTED",
+                                errorMessage,
+                                request);
+        }
+
+        @ExceptionHandler(HttpMediaTypeNotSupportedException.class)
+        public ResponseEntity<ApiErrorResponse> handleMediaTypeNotSupportedException(
+                        HttpMediaTypeNotSupportedException ex,
+                        HttpServletRequest request) {
+
+                String errorMessage = "Content-Type not supported: " + ex.getContentType();
+
+                log.warn("MEDIA_TYPE_NOT_SUPPORTED | {} | Path: {} | Method: {}",
+                                errorMessage,
+                                request.getRequestURI(),
+                                request.getMethod());
+
+                return build(HttpStatus.UNSUPPORTED_MEDIA_TYPE,
+                                "MEDIA_TYPE_NOT_SUPPORTED",
                                 errorMessage,
                                 request);
         }
