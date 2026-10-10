@@ -20,6 +20,8 @@ import org.springframework.web.method.annotation.HandlerMethodValidationExceptio
 import org.springframework.web.bind.MissingServletRequestParameterException;
 import org.springframework.web.HttpRequestMethodNotSupportedException;
 import org.springframework.web.HttpMediaTypeNotSupportedException;
+import org.springframework.web.servlet.NoHandlerFoundException;
+import org.springframework.web.servlet.resource.NoResourceFoundException;
 
 @RestControllerAdvice
 public class GlobalExceptionHandler {
@@ -185,6 +187,20 @@ public class GlobalExceptionHandler {
                 return build(HttpStatus.UNSUPPORTED_MEDIA_TYPE,
                                 "MEDIA_TYPE_NOT_SUPPORTED",
                                 errorMessage,
+                                request);
+        }
+
+        @ExceptionHandler({NoHandlerFoundException.class, NoResourceFoundException.class})
+        public ResponseEntity<ApiErrorResponse> handleMissingRoute(
+                        HttpServletRequest request) {
+
+                log.warn("RESOURCE_NOT_FOUND | Path: {} | Method: {}",
+                                request.getRequestURI(),
+                                request.getMethod());
+
+                return build(HttpStatus.NOT_FOUND,
+                                "RESOURCE_NOT_FOUND",
+                                "The requested resource was not found",
                                 request);
         }
 
