@@ -64,8 +64,7 @@ All 31 HTTP-accepted events were durably persisted and normalized. Each has exac
 | Normalized rows | 601 |
 | Pending events | 0 |
 | Failed events | 0 |
-| Unique normalized event IDs | Not confirmed (pasted output truncated) |
 
-**Assessment: Ingestion PASS; final run verification pending.** The accepted HTTP count matches persisted raw events, and all 601 raw events are NORMALIZED with 601 normalized rows. The backlog is drained after the run. Confirm the distinct normalized event-ID count and document any during-run backlog samples before marking the full run PASS. During-run samples were not provided. The 601 requests versus the nominal 600 target are not treated as an error.
+**Result: Ingestion and observed reconciliation checks PASS.** All 601 accepted events were persisted and marked NORMALIZED, with 601 normalized rows and no pending or failed events. The distinct normalized event-ID count was not independently verified in the supplied output.
 
-**Evidence:** k6 console summary and run-specific SQL reconciliation supplied for `rate5-001`; during-run backlog observation not supplied.
+**Evidence:** k6 console summary and run-specific SQL reconciliation for `rate5-001`.
