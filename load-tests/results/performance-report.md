@@ -107,3 +107,37 @@ All 31 HTTP-accepted events were durably persisted and normalized. Each has exac
 **Result:** HTTP ingestion PASS. All raw events normalized; backlog drained.
 
 **Evidence:** k6 console summary and run-specific SQL reconciliation for `rate10-001`.
+
+## 8. Load Test — 20 req/s
+
+**Run ID:** `rate20-001` (database observation's run scope not independently verified)  
+**Duration:** 120s  
+**Target rate:** 20 req/s  
+**Result:** STOP — HTTP acceptance threshold failed.
+
+| Metric | Observed |
+|---|---:|
+| Total HTTP requests | 2,401 |
+| Achieved rate | 20.003 req/s |
+| HTTP 202 checks passed | 1 |
+| Failed HTTP requests | 2,400 |
+| HTTP p95 (all responses) | 12.06 ms |
+| HTTP p95 (expected responses only) | 39.26 ms (one response) |
+| Ingestion success rate | 0.04% |
+| Dropped iterations | 0 |
+| Completed iterations | 2,401 |
+| Checks passed | 3 / 7,203 |
+
+### Database observation
+
+A separate status snapshot was reported as `0|0|0|2444|0|0`, interpreted in the previously used order as RECEIVED, PROCESSING, RETRYABLE, NORMALIZED, FAILED, and an additional count. It indicates 2,444 NORMALIZED and no pending or FAILED events in that snapshot. The snapshot's SQL and run-ID scope were not supplied, so it is **not** a verified reconciliation for this k6 run.
+
+### Assessment
+
+- k6 sustained the configured arrival rate with no dropped iterations.
+- The HTTP 202, event ID, and RECEIVED checks failed for 2,400 requests; the ingestion success threshold failed.
+- The 2,444 normalized-event observation cannot be reconciled with the k6 HTTP 202 count of 1 without confirming the SQL scope and investigating the response failures.
+- The 12.06 ms overall HTTP p95 is dominated by failed responses and must not be presented as successful ingestion latency.
+- **STOP:** Do not proceed to 40 req/s until the HTTP response failures are investigated, run-specific SQL reconciliation is obtained, and a clean rerun passes.
+
+**Evidence:** Uploaded k6 console log for the 20 req/s execution; separate database status snapshot reported in chat. Confirm the local raw-log filename before linking it as committed evidence.
