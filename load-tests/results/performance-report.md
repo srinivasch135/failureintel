@@ -82,7 +82,13 @@ All 31 HTTP-accepted events were durably persisted and normalized. Each has exac
 | Achieved rate | 10.008 req/s |
 | HTTP p95 | 36.69 ms |
 | HTTP average | 20.04 ms |
+| HTTP minimum | 7.70 ms |
+| HTTP median | 17.24 ms |
+| HTTP p90 | 28.02 ms |
 | HTTP maximum | 310.28 ms |
+| Iteration p95 | 37.12 ms |
+| Peak active VUs | 2 |
+| Configured preallocated VUs | 20 |
 | HTTP errors | 0 |
 | Dropped iterations | 0 |
 | Completed iterations | 1,201 |
