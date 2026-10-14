@@ -190,7 +190,7 @@ All 1,201 requests returned HTTP 202. The configured k6 thresholds passed with n
 | Normalized rows | 2,400 |
 | Unique normalized events | 2,400 |
 
-The final counts are based on the reported completion of the run; retain the final SQL output as evidence.
+Final run-specific SQL reconciliation confirmed 2,400 raw events, 2,400 NORMALIZED events, zero failed events, zero pending events, and exactly 2,400 unique normalized rows.
 
 ### Processing Observations
 
@@ -203,9 +203,9 @@ The final counts are based on the reported completion of the run; retain the fin
 
 The backlog decreased after ingestion stopped and eventually drained. No failed events or duplicate normalized IDs were observed in the provided snapshots. Exact snapshot times, processing throughput, peak backlog, and drain duration were not captured.
 
-**Result: PASS — HTTP ingestion; final normalization reconciliation reported complete.** This run does not establish sustainable normalization throughput at 20 events/sec. Because concurrency and batch size changed together, their individual effects cannot be isolated.
+**Result: PASS — HTTP ingestion and final database reconciliation verified.** This run does not establish sustainable normalization throughput at 20 events/sec. Because concurrency and batch size changed together, their individual effects cannot be isolated.
 
-**Evidence:** k6 output for `rate20-c4-b6-001`; PostgreSQL snapshots and final reconciliation for that run.
+**Evidence:** k6 output for `rate20-c4-b6-001`; intermediate PostgreSQL snapshots and confirmed final SQL reconciliation (`2400 | 2400 | 0 | 0 | 2400 | 2400`).
 
 ## 10. Load Test — 40 req/s
 
