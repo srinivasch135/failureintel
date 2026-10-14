@@ -8,8 +8,8 @@
 | Database | PostgreSQL 16 |
 | Infrastructure | Docker Compose |
 | Load generator | Grafana k6 |
-| Worker concurrency | 1 |
-| Worker batch size | 1 |
+| Worker concurrency | 1 (baseline); 4 (comparison) |
+| Worker batch size | 1 (baseline); 6 (comparison) |
 | Test environment | Dedicated local environment |
 
 ## 2. Performance Measurements
@@ -19,6 +19,9 @@
 | 1 req/s | 30s | 31 | 1.031 | 135.21 ms | 0 | 0 |
 | 5 req/s | 120s | 601 | 5.007 | 74.84 ms | 0 | 0 |
 | 10 req/s | 120s | 1201 | 10.008 | 36.69 ms | 0 | 0 |
+| 20 req/s (1/1) | 120s | 1 of 2,401 checks | 20.003 | 12.06 ms | 2,400 failed HTTP 202 checks | 0 |
+| 20 req/s (4/6) | 120s | 2,400 | 19.9986 | 44.36 ms | 0 | 0 |
+| 40 req/s | 120s | Pending | — | — | — | — |
 
 ## 3. Data Integrity Verification
 
@@ -42,8 +45,9 @@ All 31 HTTP-accepted events were durably persisted and normalized. Each has exac
 - HTTP p95 represents ingestion request-response latency.
 - Database reconciliation verifies eventual normalization correctness.
 - Final run-specific backlog reached zero.
-- During-run backlog progression was not recorded.
+- During-run backlog progression was not recorded for baseline runs. Untimed processing snapshots were collected for the 4/6 comparison.
 - Results represent local Docker performance, not production capacity.
+- Eventual backlog drainage does not prove sustainable normalization throughput at the offered rate.
 
 ## 5. Evidence
 
@@ -147,3 +151,73 @@ All 1,201 requests returned HTTP 202. The configured k6 thresholds passed with n
 **Result:** Database normalization PASS; HTTP acceptance FAIL in the recorded k6 execution. Overall result INCONCLUSIVE because the k6 request count does not reconcile with the run-specific database count.
 
 **Evidence:** k6 console summary and PostgreSQL reconciliation for `rate20-001`.
+
+## 9. Load Test — 20 req/s (Concurrency 4, Batch Size 6)
+
+**Run ID:** `rate20-c4-b6-001`  
+**Duration:** 120 seconds  
+**Target rate:** 20 req/s  
+**Worker enabled:** true  
+**Worker concurrency:** 4  
+**Worker batch size:** 6
+
+### k6 Results
+
+| Metric | Observed |
+|---|---:|
+| Total HTTP requests | 2,400 |
+| HTTP 202 accepted | 2,400 |
+| Achieved throughput | 19.9986 req/s |
+| Ingestion success rate | 100% |
+| HTTP average latency | 24.72 ms |
+| HTTP median latency | 19.54 ms |
+| HTTP p90 latency | 31.83 ms |
+| HTTP p95 latency | 44.36 ms |
+| HTTP maximum latency | 706.84 ms |
+| Iteration p95 | 45.33 ms |
+| HTTP failures | 0 |
+| Dropped iterations | 0 |
+| Checks passed | 7,200 / 7,200 |
+
+### Database Reconciliation
+
+| Metric | Final reported result |
+|---|---:|
+| Raw events | 2,400 |
+| NORMALIZED events | 2,400 |
+| Failed events | 0 |
+| Pending events | 0 |
+| Normalized rows | 2,400 |
+| Unique normalized events | 2,400 |
+
+The final counts are based on the reported completion of the run; retain the final SQL output as evidence.
+
+### Processing Observations
+
+| Observation | Normalized | Pending | Failed |
+|---|---:|---:|---:|
+| 1 | 588 | 1,812 | 0 |
+| 2 | 1,584 | 816 | 0 |
+| 3 | 1,770 | 630 | 0 |
+| Final (reported) | 2,400 | 0 | 0 |
+
+The backlog decreased after ingestion stopped and eventually drained. No failed events or duplicate normalized IDs were observed in the provided snapshots. Exact snapshot times, processing throughput, peak backlog, and drain duration were not captured.
+
+**Result: PASS — HTTP ingestion; final normalization reconciliation reported complete.** This run does not establish sustainable normalization throughput at 20 events/sec. Because concurrency and batch size changed together, their individual effects cannot be isolated.
+
+**Evidence:** k6 output for `rate20-c4-b6-001`; PostgreSQL snapshots and final reconciliation for that run.
+
+## 10. Load Test — 40 req/s
+
+**Status: NOT STARTED**
+
+| Parameter | Planned value |
+|---|---|
+| Target rate | 40 req/s |
+| Duration | 120 seconds |
+| Expected iterations | Approximately 4,800 |
+| Worker concurrency | To be recorded |
+| Worker batch size | To be recorded |
+| Run ID | New unique run ID |
+
+Record HTTP 202 acceptance, latency, failures, dropped iterations, timestamped processing/backlog snapshots, and final database reconciliation. Measure drain duration if possible. Do not equate eventual normalization with sustainable 40 events/sec processing capacity.
