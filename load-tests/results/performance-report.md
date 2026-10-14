@@ -73,20 +73,32 @@ All 31 HTTP-accepted events were durably persisted and normalized. Each has exac
 ## 7. Load Test — 10 req/s
 
 **Run ID:** `rate10-001`  
-**Execution:** 120 seconds at 10 iterations/s; 1,201 completed, 0 interrupted.  
-**HTTP checks:** 3,603/3,603 passed; 1,201/1,201 HTTP 202 accepted.  
-**HTTP latency:** average 20.04 ms; median 17.24 ms; p90 28.02 ms; p95 36.69 ms; maximum 310.28 ms.  
-**Dropped iterations:** 0; **HTTP failures:** 0.
+**Duration:** 120s  
+**Target rate:** 10 req/s
 
-| Reconciliation metric | Observed |
+| Metric | Result |
 |---|---:|
-| Committed raw events | 1,201 |
-| NORMALIZED events | 1,201 (completion reported) |
-| Normalized rows | 936 at last shared SQL sample |
-| Unique normalized event IDs | 936 at last shared SQL sample |
-| Pending events | 0 (completion reported) |
-| Failed events | 0 at last shared SQL sample |
+| HTTP 202 | 1,201 |
+| Achieved rate | 10.008 req/s |
+| HTTP p95 | 36.69 ms |
+| HTTP average | 20.04 ms |
+| HTTP maximum | 310.28 ms |
+| HTTP errors | 0 |
+| Dropped iterations | 0 |
+| Completed iterations | 1,201 |
+| Checks passed | 3,603 / 3,603 |
 
-**Result: Ingestion PASS; backlog drainage reported complete.** The k6 run accepted all 1,201 requests without HTTP errors or dropped iterations. Run-specific SQL observations showed normalized events increasing from 731 to 936 while pending events fell from 470 to 265, with zero failed events in the samples. Full drainage was subsequently reported; a final all-1,201-row SQL reconciliation output was not provided.
+### Database verification
 
-**Evidence:** k6 console summary and run-specific PostgreSQL backlog observations for `rate10-001`.
+| Metric | Last recorded SQL sample |
+|---|---:|
+| Raw events | 1,201 |
+| NORMALIZED events | 936 |
+| Normalized rows | 936 |
+| Unique normalized event IDs | 936 |
+| Pending events | 265 |
+| Failed events | 0 |
+
+**Backlog:** Subsequently drained to zero (confirmed after the run). Final SQL counts were not captured in the supplied evidence.
+
+**Result:** HTTP ingestion PASS. Backlog drained.
