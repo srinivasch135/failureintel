@@ -205,7 +205,7 @@ The backlog decreased after ingestion stopped and eventually drained. No failed 
 
 **Result: PASS — HTTP ingestion and final database reconciliation verified.** This run does not establish sustainable normalization throughput at 20 events/sec. Because concurrency and batch size changed together, their individual effects cannot be isolated.
 
-**Evidence:** k6 output for `rate20-c4-b6-001`; intermediate PostgreSQL snapshots and confirmed final SQL reconciliation (`2400 | 2400 | 0 | 0 | 2400 | 2400`).
+**Evidence:** k6 output for `rate20-c4-b6-001`; intermediate PostgreSQL snapshots and confirmed final SQL reconciliation.
 
 ## 10. Load Test — 40 req/s
 
