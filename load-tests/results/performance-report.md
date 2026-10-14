@@ -105,4 +105,5 @@ All 31 HTTP-accepted events were durably persisted and normalized. Each has exac
 | Failed events | 0 |
 
 **Result:** HTTP ingestion PASS. All raw events normalized; backlog drained.
+
 **Evidence:** k6 console summary and run-specific SQL reconciliation for `rate10-001`.
