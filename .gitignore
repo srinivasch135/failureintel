@@ -42,4 +42,5 @@ build/
 .m2-codex/
 
 #AGENTS
-.AGENTS.mdAGENTS.md
+.AGENTS.md
+
