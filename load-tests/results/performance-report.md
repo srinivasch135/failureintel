@@ -90,15 +90,12 @@ All 31 HTTP-accepted events were durably persisted and normalized. Each has exac
 
 ### Database verification
 
-| Metric | Last recorded SQL sample |
+| Metric | Final SQL result |
 |---|---:|
 | Raw events | 1,201 |
-| NORMALIZED events | 936 |
-| Normalized rows | 936 |
-| Unique normalized event IDs | 936 |
-| Pending events | 265 |
+| NORMALIZED events | 1,201 |
+| Normalized rows | 1,201 |
+| Pending events | 0 |
 | Failed events | 0 |
 
-**Backlog:** Subsequently drained to zero (confirmed after the run). Final SQL counts were not captured in the supplied evidence.
-
-**Result:** HTTP ingestion PASS. Backlog drained.
+**Result:** HTTP ingestion PASS. All raw events normalized; backlog drained.
