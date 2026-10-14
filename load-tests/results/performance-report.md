@@ -113,8 +113,7 @@ All 1,201 requests returned HTTP 202. The configured k6 thresholds passed with n
 
 **Evidence:** `results/raw-logs/rate10-001.txt`; PostgreSQL reconciliation for `rate10-001`.
 
-<<<<<<< Updated upstream
-**Evidence:** k6 console summary and run-specific SQL reconciliation for `rate10-001`.
+
 
 ## 8. Load Test — 20 req/s
 
