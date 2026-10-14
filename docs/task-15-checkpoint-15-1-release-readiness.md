@@ -1,7 +1,7 @@
 # Task 15 — Checkpoint 15.1 release-readiness gate
 
-**Assessment date:** 2026-10-08
-**Decision:** **NO-GO for first deployment** until the release boundary and target deployment/recovery plan are established.
+**Assessment date:** 2026-10-11
+**Decision:** **TASK 15.1 COMPLETE. GO to prepare controlled live worker verification (Task 15.2); production execution still requires explicit authorization.**
 
 This is a release-boundary assessment, not a production deployment. Repository evidence is separated from facts that require access to the production database and deployment environment.
 
@@ -80,28 +80,53 @@ The production durability acceptance is demonstrated primarily by the determinis
 
 The durable-ingestion architecture document describes the asynchronous raw-capture/worker lifecycle. Its deployment section still contained an outdated instruction to retain synchronous behavior temporarily; this checkpoint marks that rollout sequence as historical and points to the current Task 15 release boundary. The Phase 1 correctness matrix’s old rollback statement is explicitly labeled historical/superseded. Current behavior is raw capture committed independently, followed by asynchronous processing whose later failure preserves the raw row.
 
-## Release decision
+## Production evidence update (2026-10-11)
 
-**NO-GO for first deployment.** No production migration defect has been observed: no production application is deployed, and the local Compose database is healthy at V14. A distinct compatibility-only binary is not needed if the first target has no existing app version; use one pinned image for A (worker off) and B (worker on). The target deployment/migration owner and recovery procedure are not established, and the running local image predates current HEAD, so it cannot serve as the pinned release image. Select the target, confirm its DB baseline, produce and identify the exact candidate image, and establish rollback/backup checks before deployment.
+- Render's active deploy is commit `37cc60d8014d1b5ae8e934f698d462d5fd1e1d69` (`fix(api): return 404 for unmapped routes`), deploy `dep-db573qqvcj2c73ed70g0`. The service is configured for one instance.
+- The Render application startup log identifies instance `srv-db4fp8t9fdbs73bqorp0-4fwl8`. That instance connected to the production Neon database, successfully validated 14 migrations, found schema version 14 current, and logged that no migration was necessary. This proves that this instance validated the migration chain at startup; it does not establish which actor originally applied the migrations. Neon `flyway_schema_history` independently records successful V1–V14 entries.
+- The Render Environment screenshot confirms the exact full variable name `FAILURE_EVENT_WORKER_ENABLED` and effective value `false` for the current service. This confirms worker-disabled capture-only operation; no configuration was changed in this assessment.
+- The V13 production idempotency-key unique index was inspected read-only in Neon and found with the expected trimmed-key partial unique definition. Production ingestion was confirmed as HTTP 202 with a committed `RECEIVED` event. Render application logs are queryable and include health checks.
+- Neon PITR evidence: the historical recovery branch `pitr-drill-20261010` was successfully created and verified in the earlier drill. It was temporary and its automatic deletion after approximately six hours is expected. Branch creation was verified; restoring production data from it was not tested.
+
+### Release-specific rollback and recovery procedure
+
+1. Disable `FAILURE_EVENT_WORKER_ENABLED` and restart the single Render application instance. Keep the service and Neon production database available for raw capture if the API remains healthy. Do not delete, rewrite, or purge `RECEIVED`, `RETRYABLE`, or in-flight event rows; they remain durable for later processing.
+2. Restore the previous known-good Render application release through Render's deploy history. Confirm application health and leave the worker disabled until the release decision is reassessed. The database remains at Flyway V14; do not attempt to reverse Flyway migrations as part of application rollback.
+3. Use Neon historical recovery only if database state itself requires recovery after a data-impacting failure. The prior drill establishes successful historical branch creation, not a tested production restore. If needed, create a new point-in-time recovery branch from the appropriate pre-incident timestamp, verify it, and follow Neon’s controlled recovery/cutover process. Do not overwrite production or claim restore success based solely on the earlier branch-creation drill.
+
+## Task 15.1 completion and Task 15.2 preparation
+
+**TASK 15.1 COMPLETE.** Task 14 tests, deployed release identity and health, single-instance topology, successful Flyway V1–V14 history and live startup validation, V13 idempotency index, live `202 Accepted` raw capture, usable application logs, worker-disabled configuration, and the release-specific application rollback/PITR evidence are satisfied. Startup logs show validation of the already-current schema; they do not identify the original migration actor. The Task 15.1 acceptance does not require attributing prior migration execution beyond the verified successful Flyway history and startup validation.
+
+**Task 15.2 execution plan (not run; production changes require explicit authorization):**
+
+1. Capture the current Render deploy/commit, single instance, healthy status, worker value `false`, and Neon production raw/normalized counts and latest event IDs. Record the starting backlog so existing queued rows remain distinguishable.
+2. In Render, change only `FAILURE_EVENT_WORKER_ENABLED` to `true` and restart/redeploy the same application release on the single instance. Confirm healthy startup and worker-enabled configuration in logs before submitting test traffic.
+3. Submit one valid failure event with a fresh, unique `Idempotency-Key`; record response, correlation ID, and returned event ID. Expect HTTP `202` for committed raw capture.
+4. In Neon, poll only that event ID and its normalized row. Verify the raw lifecycle reaches `NORMALIZED` and the normalized row uses the same event ID. `PROCESSING` may be brief; capture it from application logs if polling does not observe it in the database. Correlate claim/processing logs by event ID and attempt.
+5. Verify retry using an event that produces a supported retryable technical failure through the agreed non-destructive test path; inspect `RETRYABLE`, attempt count, `next_retry_at`, then verify a subsequent successful attempt reaches `NORMALIZED`. Verify lease recovery with a controlled worker-stop/crash only if the existing approved test scenario can safely leave a claim to expire; inspect expiry, recovery transition, and later processing without deleting or editing rows. Do not simulate database-write failure against production. If a safe retry/recovery trigger is unavailable, report that specific scenario as unverified rather than injecting destructive failure.
+6. Restore `FAILURE_EVENT_WORKER_ENABLED=false` after the scoped run if requested by the release operator, confirm the single instance is healthy, and verify any remaining backlog is still durable. Preserve test event rows and evidence.
+
+Repository defaults for the plan are batch size 8, worker concurrency 2, claim delay 2 seconds, lease timeout 5 minutes, recovery scan 30 seconds, and retry maximum 5 with configured delays/jitter; apply production overrides only if already approved. The plan intentionally does not enable the worker, submit events, or alter production data/configuration.
 
 ## Gate summary
 
 ```text
 Task 14:                 PASS (272 full; 31 reports; Java 17.0.20.1; zero failures/errors/skips)
-Artifact A:              f2c41582809bf43f11e08734204458994246f938 (same-image candidate; digest unresolved)
-Artifact B:              f2c41582809bf43f11e08734204458994246f938 (same-image candidate; digest unresolved)
-Compatibility A:         NOT APPLICABLE if first target has no previous app version; confirm before rollout
-Flyway baseline:         Local V14 verified; production N/A until target selected
-V11/V13 preconditions:   Local PASS (empty table); target N/A until selected
-Index risk:              Local footprint measured; target N/A until selected
-Deployment topology:     REPO-ONLY (Compose is local; target not selected)
-Migration owner:         UNRESOLVED
-Rollback:                UNRESOLVED
-Backup/PITR:             UNRESOLVED
-Config source:           REPO-ONLY
-Metrics/log access:      REPO-ONLY; deployed access N/A until target exists
+Active release:          Render commit 37cc60d8014d1b5ae8e934f698d462d5fd1e1d69; deploy dep-db573qqvcj2c73ed70g0
+Render instances:        1 configured
+Flyway startup:          PASS; instance validated 14; current version 14, no migration run
+Original migration actor: UNVERIFIED; startup evidence is validation only
+V13 production index:    PASS; expected partial unique index present
+Worker flag:             PASS; screenshot confirms FAILURE_EVENT_WORKER_ENABLED=false
+Render application logs: PASS; logs queryable
+Rollback procedure:      DOCUMENTED; application rollback preserves database queue
+PITR evidence:           PASS for historical branch creation only; restore/cutover not tested
+Task 15.1:               COMPLETE
+Task 15.2:               PREPARED; execution not authorized/performed
+Controlled worker check: GO to begin only after explicit production-change authorization
 Documentation:           CORRECTED (historical baseline explicitly marked; release docs added)
-Release decision:        NO-GO for first deployment
+Release decision:        Task 15.1 PASS; Task 15.2 awaits explicit authorization
 ```
 
 External PowerShell reported `clean verify` completed successfully on 2026-10-08 with Maven 3.9.14 and Java 17.0.20.1. The 31 fresh Surefire XML reports independently confirm Java 17.0.20.1 for all 272 tests and include all nine focused Task 14 integration classes (89 tests). This establishes repository test status only; it does not verify production state or release artifacts.
@@ -112,4 +137,44 @@ External PowerShell reported `clean verify` completed successfully on 2026-10-08
 - `docs/phase-1-correctness-matrix.md` — explicit historical/superseded notice for the old synchronous rollback statement.
 - `docs/durable-failure-event-ingestion-architecture.md` — labels the obsolete synchronous rollout sequence as historical and identifies the current release plan.
 
-No production code, Flyway migration, production data, deployment infrastructure, or runtime configuration was changed.
+No production code, Flyway migration, production data, deployment infrastructure, or runtime configuration was changed. The only repository edit was this release-evidence documentation update.
+
+## Task 15.6 — final production capacity checkpoint
+
+**Decision: CHECKPOINT 15.6 PASS; TASK 15 COMPLETE.** This records the bounded capacity and worker-off/on evidence gathered on 2026-10-12. It does not repeat Task 14 or Checkpoints 15.1–15.5.
+
+### Capacity measurements
+
+| Measure | Concurrency 1 baseline | Concurrency 2 candidate |
+|---|---|---|
+| Configuration / topology | Worker enabled, concurrency 1, batch size 1; one Render instance (operator-confirmed settings) | Candidate deployment reported Live/healthy after the concurrency change; one configured Render instance |
+| Workload | Five unique synthetic events; five HTTP 202 responses | Five unique synthetic events; five HTTP 202 responses. The request label was accidentally `TASK15_CAPACITY_BASELINE`, not `TASK15_CAPACITY_CANDIDATE`; workload size and event payload class were otherwise equivalent. |
+| Database arrival span | `ingested_at` 17:31:55.422–17:32:00.826 UTC (5.404 s) | `ingested_at` 17:38:57.945–17:39:02.146 UTC (4.201 s) |
+| Processing result | Five `NORMALIZED`, five attempts total, one attempt each, zero failed, zero backlog, five normalized rows | Five `NORMALIZED`, one attempt each, zero failure codes, one normalized row per raw event |
+| Completion timing | All five normalized by the read-only Neon check at 17:32:26 UTC; exact drain time was not captured | All five normalized by the subsequent Neon check; exact drain time was not captured |
+| Resource / database pool signals | Render CPU samples 0.116, 0.150, 0.042 CPU and memory samples 185 MB, 306 MB, 330 MB during the 17:31–17:33 UTC window. Neon connection-pool utilization unavailable. | Render log and metrics reads returned unauthorized, so candidate-specific instance/resource measurements are unavailable. Neon pool utilization unavailable. |
+
+No useful processing-capacity improvement was established for concurrency 2: exact worker drain timing and candidate resource signals were unavailable, and the candidate workload label was wrong. The small difference in database arrival spans is not evidence of faster processing. Concurrency 2 was not selected; the final setting is concurrency 1.
+
+### Worker-off/on durability and recovery
+
+- Worker disabled: the operator confirmed the worker-off deployment was Live and healthy. Five synthetic requests returned HTTP 202. Neon showed all five committed raw rows as `RECEIVED`, `attempt_count=0`, with no normalized rows.
+- Worker re-enabled: the operator confirmed the worker-enabled deployment was Live and healthy. Read-only Neon verification of those same five event IDs found all five `NORMALIZED`, `attempt_count=1`, no `failure_code`, `failure_reason`, or `next_attempt_at`, and exactly one normalized row per raw event using the same event ID.
+- All five raw rows remain present and retain their original non-empty synthetic payload. No production rows were deleted or reset. The exercise was performed once.
+
+### Final configuration and gate
+
+```text
+Worker enabled:          true (operator-confirmed)
+Worker concurrency:      1 (operator-confirmed; concurrency 2 not selected)
+Worker batch size:       1 (operator-confirmed)
+Render instances:        1 configured
+Worker-off durability:   PASS; five committed RECEIVED rows, zero attempts, no normalized rows
+Worker-on recovery:      PASS; same five rows NORMALIZED at attempt 1, one normalized row each
+Raw payload durability:  PASS; all five raw payloads remain present
+Candidate capacity gain: NOT DEMONSTRATED; candidate-specific Render metrics unavailable
+Checkpoint 15.6:         PASS
+Task 15:                 COMPLETE
+```
+
+Optional candidate resource and Neon connection-pool signals were unavailable and are not represented as measured. No further capacity workload or worker toggle was performed after the successful recovery verification.
