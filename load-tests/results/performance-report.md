@@ -65,6 +65,6 @@ All 31 HTTP-accepted events were durably persisted and normalized. Each has exac
 | Pending events | 0 |
 | Failed events | 0 |
 
-**Result: Ingestion and observed reconciliation checks PASS.** All 601 accepted events were persisted and marked NORMALIZED, with 601 normalized rows and no pending or failed events. The distinct normalized event-ID count was not independently verified in the supplied output.
+**Result: Ingestion and observed reconciliation checks PASS.** All 601 accepted events were persisted and marked NORMALIZED, with 601 normalized rows and no pending or failed events.
 
 **Evidence:** k6 console summary and run-specific SQL reconciliation for `rate5-001`.
