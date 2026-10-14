@@ -18,6 +18,7 @@
 |---|---|---|---|---|---|---|
 | 1 req/s | 30s | 31 | 1.031 | 135.21 ms | 0 | 0 |
 | 5 req/s | 120s | 601 | 5.007 | 74.84 ms | 0 | 0 |
+| 10 req/s | 120s | 1201 | 10.008 | 36.69 ms | 0 | 0 |
 
 ## 3. Data Integrity Verification
 
@@ -68,3 +69,24 @@ All 31 HTTP-accepted events were durably persisted and normalized. Each has exac
 **Result: Ingestion and observed reconciliation checks PASS.** All 601 accepted events were persisted and marked NORMALIZED, with 601 normalized rows and no pending or failed events.
 
 **Evidence:** k6 console summary and run-specific SQL reconciliation for `rate5-001`.
+
+## 7. Load Test — 10 req/s
+
+**Run ID:** `rate10-001`  
+**Execution:** 120 seconds at 10 iterations/s; 1,201 completed, 0 interrupted.  
+**HTTP checks:** 3,603/3,603 passed; 1,201/1,201 HTTP 202 accepted.  
+**HTTP latency:** average 20.04 ms; median 17.24 ms; p90 28.02 ms; p95 36.69 ms; maximum 310.28 ms.  
+**Dropped iterations:** 0; **HTTP failures:** 0.
+
+| Reconciliation metric | Observed |
+|---|---:|
+| Committed raw events | 1,201 |
+| NORMALIZED events | 1,201 (completion reported) |
+| Normalized rows | 936 at last shared SQL sample |
+| Unique normalized event IDs | 936 at last shared SQL sample |
+| Pending events | 0 (completion reported) |
+| Failed events | 0 at last shared SQL sample |
+
+**Result: Ingestion PASS; backlog drainage reported complete.** The k6 run accepted all 1,201 requests without HTTP errors or dropped iterations. Run-specific SQL observations showed normalized events increasing from 731 to 936 while pending events fell from 470 to 265, with zero failed events in the samples. Full drainage was subsequently reported; a final all-1,201-row SQL reconciliation output was not provided.
+
+**Evidence:** k6 console summary and run-specific PostgreSQL backlog observations for `rate10-001`.
