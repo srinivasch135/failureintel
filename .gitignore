@@ -40,3 +40,6 @@ build/
 # Codex workspace-local Maven cache
 .codex-maven-home/
 .m2-codex/
+
+#AGENTS
+AGENTS.md

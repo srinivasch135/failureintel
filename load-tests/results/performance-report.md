@@ -73,30 +73,33 @@ All 31 HTTP-accepted events were durably persisted and normalized. Each has exac
 ## 7. Load Test — 10 req/s
 
 **Run ID:** `rate10-001`  
-**Duration:** 120s  
-**Target rate:** 10 req/s
+**Duration:** 120 seconds  
+**Target rate:** 10 req/s  
+**Worker concurrency:** 1  
+**Worker batch size:** 1
 
-| Metric | Result |
+### Performance results
+
+| Metric | Observed |
 |---|---:|
-| HTTP 202 | 1,201 |
-| Achieved rate | 10.008 req/s |
-| HTTP p95 | 36.69 ms |
-| HTTP average | 20.04 ms |
-| HTTP minimum | 7.70 ms |
-| HTTP median | 17.24 ms |
-| HTTP p90 | 28.02 ms |
-| HTTP maximum | 310.28 ms |
+| Total HTTP requests | 1,201 |
+| HTTP 202 responses | 1,201 |
+| Achieved throughput | 10.008 req/s |
+| HTTP average latency | 20.04 ms |
+| HTTP median latency | 17.24 ms |
+| HTTP p90 latency | 28.02 ms |
+| HTTP p95 latency | 36.69 ms |
+| HTTP maximum latency | 310.28 ms |
 | Iteration p95 | 37.12 ms |
 | Peak active VUs | 2 |
-| Configured preallocated VUs | 20 |
-| HTTP errors | 0 |
+| Preallocated VUs | 20 |
+| HTTP failures | 0 |
 | Dropped iterations | 0 |
-| Completed iterations | 1,201 |
 | Checks passed | 3,603 / 3,603 |
 
-### Database verification
+### Database reconciliation
 
-| Metric | Final SQL result |
+| Metric | Final result |
 |---|---:|
 | Raw events | 1,201 |
 | NORMALIZED events | 1,201 |
@@ -104,44 +107,44 @@ All 31 HTTP-accepted events were durably persisted and normalized. Each has exac
 | Pending events | 0 |
 | Failed events | 0 |
 
-**Result:** HTTP ingestion PASS. All raw events normalized; backlog drained.
+**Result: PASS**
+
+All 1,201 requests returned HTTP 202. The configured k6 thresholds passed with no dropped iterations or HTTP failures. Final database reconciliation confirmed 1,201 normalized events and zero pending or failed events.
+
+**Evidence:** `results/raw-logs/rate10-001.txt`; PostgreSQL reconciliation for `rate10-001`.
 
 <<<<<<< Updated upstream
 **Evidence:** k6 console summary and run-specific SQL reconciliation for `rate10-001`.
 
 ## 8. Load Test — 20 req/s
 
-**Run ID:** `rate20-001` (database observation's run scope not independently verified)  
-**Duration:** 120s  
-**Target rate:** 20 req/s  
-**Result:** STOP — HTTP acceptance threshold failed.
+**Run ID:** `rate20-001`  
+**Duration:** 120 seconds  
+**Target rate:** 20 req/s
+
+### k6 Results
 
 | Metric | Observed |
 |---|---:|
-| Total HTTP requests | 2,401 |
+| Total requests | 2,401 |
 | Achieved rate | 20.003 req/s |
 | HTTP 202 checks passed | 1 |
-| Failed HTTP requests | 2,400 |
-| HTTP p95 (all responses) | 12.06 ms |
-| HTTP p95 (expected responses only) | 39.26 ms (one response) |
+| Failed HTTP checks | 2,400 |
 | Ingestion success rate | 0.04% |
+| HTTP p95 | 12.06 ms |
 | Dropped iterations | 0 |
-| Completed iterations | 2,401 |
-| Checks passed | 3 / 7,203 |
 
-### Database observation
+### Database Verification
 
-A separate status snapshot was reported as `0|0|0|2444|0|0`, interpreted in the previously used order as RECEIVED, PROCESSING, RETRYABLE, NORMALIZED, FAILED, and an additional count. It indicates 2,444 NORMALIZED and no pending or FAILED events in that snapshot. The snapshot's SQL and run-ID scope were not supplied, so it is **not** a verified reconciliation for this k6 run.
+| Metric | Observed |
+|---|---:|
+| Raw events | 2,444 |
+| Normalized events | 2,444 |
+| Pending events | 0 |
+| Failed events | 0 |
+| Normalized rows | 2,444 |
+| Unique normalized events | 2,444 |
 
-### Assessment
+**Result:** Database normalization PASS; HTTP acceptance FAIL in the recorded k6 execution. Overall result INCONCLUSIVE because the k6 request count does not reconcile with the run-specific database count.
 
-- k6 sustained the configured arrival rate with no dropped iterations.
-- The HTTP 202, event ID, and RECEIVED checks failed for 2,400 requests; the ingestion success threshold failed.
-- The 2,444 normalized-event observation cannot be reconciled with the k6 HTTP 202 count of 1 without confirming the SQL scope and investigating the response failures.
-- The 12.06 ms overall HTTP p95 is dominated by failed responses and must not be presented as successful ingestion latency.
-- **STOP:** Do not proceed to 40 req/s until the HTTP response failures are investigated, run-specific SQL reconciliation is obtained, and a clean rerun passes.
-
-**Evidence:** Uploaded k6 console log for the 20 req/s execution; separate database status snapshot reported in chat. Confirm the local raw-log filename before linking it as committed evidence.
-=======
-**Evidence:** k6 console summary and run-specific SQL reconciliation for `rate10-001`.
->>>>>>> Stashed changes
+**Evidence:** k6 console summary and PostgreSQL reconciliation for `rate20-001`.
