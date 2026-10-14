@@ -49,7 +49,7 @@ All 31 HTTP-accepted events were durably persisted and normalized. Each has exac
 - k6 output: `smoke-163-002.txt`
 - PostgreSQL reconciliation: run ID `smoke-163-002`
 
-## 6. Checkpoint 16.4 — 5 req/s
+## 6. Load Test — 5 req/s
 
 **Run ID:** `rate5-001`  
 **Execution:** 120 seconds at 5 iterations/s; 601 completed, 0 interrupted.  
