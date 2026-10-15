@@ -47,3 +47,5 @@ build/
 ##Load tests readme
 /load-tests/README.md
 
+#Scripts
+/scripts/
