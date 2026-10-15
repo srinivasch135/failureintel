@@ -131,7 +131,7 @@
 
 **Assessment: PASS.** All accepted events were normalized, with no pending or failed events at final reconciliation.
 
-**Evidence:** `results/raw-logs/rate10-001.txt`; run-specific PostgreSQL reconciliation.
+**Evidence:** `results/raw_logs/rate10-001.txt`; run-specific PostgreSQL reconciliation.
 
 ## Load Test — 20 req/s
 
@@ -172,7 +172,7 @@
 
 ## Load Test — 40 req/s
 
-**Run ID:** `rate40-c4-b6-002-k6`  
+**Run ID:** `rate40-c4-b6-001-k6`  
 **Configuration:** 40 req/s for 120 seconds; worker enabled; **C=4, B=6**.
 
 ### k6 Results
@@ -205,4 +205,4 @@
 
 **Assessment: PASS.** All 4,801 requests were accepted and eventually normalized exactly once. The worker accumulated backlog during ingestion, so sustained normalization throughput at 40 events/sec was not demonstrated.
 
-**Evidence:** k6 output for `rate40-c4-b6-002-k6` in `results/raw-logs/`; final run-specific PostgreSQL reconciliation.
+**Evidence:** k6 output for `rate40-c4-b6-001-k6` in `results/raw_logs/`; final run-specific PostgreSQL reconciliation.
