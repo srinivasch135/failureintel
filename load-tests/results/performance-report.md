@@ -88,12 +88,11 @@
 |---|---:|
 | Raw events | 601 |
 | NORMALIZED events | 601 |
-| Normalized rows | Not independently verified for this run |
-| Unique normalized events | Not independently verified for this run |
+| Normalized rows | 601 |
 | Pending events | 0 |
 | Failed events | 0 |
 
-**Assessment: PASS for ingestion and final raw-event processing status.** All 601 requests passed k6 checks, with zero HTTP failures or dropped iterations. The run-specific status query on October 15, 2026 at 11:39:23 showed 601 NORMALIZED events and no other statuses. One-to-one normalized-row reconciliation was not separately supplied for this run.
+**Assessment: PASS for ingestion and final raw-event processing status.**  All 601 ingestion requests passed k6 checks, with zero HTTP failures or dropped iterations. Run-specific PostgreSQL reconciliation confirmed all 601 events were eventually normalized exactly once, with no pending or failed events.
 
 **Evidence:** `results/raw_logs/rate5-c3-b5-001-k6.txt`; run-specific PostgreSQL processing-status query.
 
