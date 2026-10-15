@@ -207,3 +207,13 @@
 **Assessment: PASS.** All 4,801 requests were accepted and eventually normalized exactly once. The worker accumulated backlog during ingestion, so sustained normalization throughput at 40 events/sec was not demonstrated.
 
 **Evidence:** k6 output for `rate40-c4-b6-001-k6` in `results/raw_logs/`; final run-specific PostgreSQL reconciliation.
+
+## Measured Boundary and Task 16 Conclusion
+
+The highest successfully tested ingestion rate was **40 req/s for 120 seconds**, with worker concurrency **C=4** and batch size **B=6**. The k6 run recorded 4,801 accepted HTTP 202 responses, 100% ingestion success, zero HTTP failures, zero dropped iterations, and HTTP p95 latency of 65.93 ms. Run-specific PostgreSQL reconciliation recorded 4,801 raw events, 4,801 NORMALIZED events, and 4,801 unique normalized records, with no pending or failed events at final observation.
+
+**Observed processing limitation:** During the 40 req/s run, the normalization backlog accumulated before eventually draining. This shows that asynchronous normalization did not keep pace with ingestion throughout the measurement interval. It does not establish a definitive CPU, database, or other resource-level root cause. No ingestion failure boundary was observed at the highest tested rate; **40 req/s is the highest tested successful ingestion rate, not a proven maximum or sustained normalization capacity**.
+
+**Limitations:** Tests used a dedicated local Docker Compose environment with Spring Boot/Java 17, PostgreSQL 16, and Grafana k6. Worker configurations differed across rates (C=1/B=1 for smoke and 10 req/s, C=3/B=5 for 5 req/s, and C=4/B=6 for 20 and 40 req/s), so their independent effects cannot be isolated. The 120-second load levels do not establish long-duration stability. Results depend on local hardware and resource allocation and cannot be directly extrapolated to Render/Neon capacity.
+
+**Task 16 status: COMPLETE.** The planned load-test baseline, run-specific reconciliation, and measured-boundary analysis are documented. No additional load tests or optimizations are included in this checkpoint.
