@@ -21,7 +21,7 @@
 | 10 req/s | 120s | 1201 | 10.008 | 36.69 ms | 0 | 0 |
 | 20 req/s (1/1) | 120s | 1 of 2,401 checks | 20.003 | 12.06 ms | 2,400 failed HTTP 202 checks | 0 |
 | 20 req/s (4/6) | 120s | 2,400 | 19.9986 | 44.36 ms | 0 | 0 |
-| 40 req/s | 120s | Pending | — | — | — | — |
+| 40 req/s (4/6) | 120s | 4,801 | 40.0006 | 65.93 ms | 0 | 0 |
 
 ## 3. Data Integrity Verification
 
@@ -207,17 +207,58 @@ The backlog decreased after ingestion stopped and eventually drained. No failed 
 
 **Evidence:** k6 output for `rate20-c4-b6-001`; intermediate PostgreSQL snapshots and confirmed final SQL reconciliation.
 
-## 10. Load Test — 40 req/s
+## 10. Load Test — 40 req/s (Concurrency 4, Batch Size 6)
 
-**Status: NOT STARTED**
+**Run ID:** `rate40-c4-b6-002-k6`  
+**Duration:** 120 seconds  
+**Target rate:** 40 req/s  
+**Worker enabled:** true (configured)  
+**Worker concurrency:** 4 (configured)  
+**Worker batch size:** 6 (configured)
 
-| Parameter | Planned value |
-|---|---|
-| Target rate | 40 req/s |
-| Duration | 120 seconds |
-| Expected iterations | Approximately 4,800 |
-| Worker concurrency | To be recorded |
-| Worker batch size | To be recorded |
-| Run ID | New unique run ID |
+### k6 Results
 
-Record HTTP 202 acceptance, latency, failures, dropped iterations, timestamped processing/backlog snapshots, and final database reconciliation. Measure drain duration if possible. Do not equate eventual normalization with sustainable 40 events/sec processing capacity.
+| Metric | Observed |
+|---|---:|
+| Total HTTP requests | 4,801 |
+| HTTP 202 accepted | 4,801 |
+| Achieved throughput | 40.0006 req/s |
+| Ingestion success rate | 100% |
+| HTTP average latency | 23.72 ms |
+| HTTP median latency | 17.53 ms |
+| HTTP p90 latency | 42.18 ms |
+| HTTP p95 latency | 65.93 ms |
+| HTTP maximum latency | 332.29 ms |
+| Iteration p95 | 66.41 ms |
+| HTTP failures | 0 |
+| Dropped iterations | 0 |
+| Checks passed | 14,403 / 14,403 |
+
+### Database Reconciliation
+
+| Metric | Final result |
+|---|---:|
+| Raw events | 4,801 |
+| NORMALIZED events | 4,801 |
+| Failed events | 0 |
+| Pending events | 0 |
+| Normalized rows | 4,801 |
+| Unique normalized events | 4,801 |
+
+Final run-specific SQL reconciliation confirmed that all 4,801 accepted events were persisted and normalized, with exactly one normalized row per event. No pending or failed events remained.
+
+### Processing Observations
+
+| Observation | Raw events | Normalized | Pending | Failed |
+|---|---:|---:|---:|---:|
+| During ingestion | 1,464 | 102 | 1,362 | 0 |
+| After ingestion | 4,801 | 540 | 4,261 | 0 |
+| Drain observation 1 | 4,801 | 636 | 4,165 | 0 |
+| Drain observation 2 | 4,801 | 1,260 | 3,541 | 0 |
+| Final reconciliation | 4,801 | 4,801 | 0 | 0 |
+
+The API maintained the requested 40 req/s ingestion rate without HTTP failures or dropped iterations. Normalization lagged behind ingestion: the largest **observed** pending count was 4,261 events. After the request window ended, the worker continued processing until the backlog reached zero. Snapshot timestamps and total drain duration were not captured, so the peak backlog and sustained normalization throughput cannot be determined from these observations.
+
+**Result: PASS — HTTP ingestion and final database reconciliation verified.** Sustained end-to-end normalization at 40 events/sec was **not demonstrated**. This run used concurrency 4 and batch size 6 together; it does not isolate the effect of either setting.
+
+**Evidence:** k6 console output for `rate40-c4-b6-002-k6` (saved under `results/raw-logs/`); run-specific intermediate SQL snapshots and final PostgreSQL reconciliation.
