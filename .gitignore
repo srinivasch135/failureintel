@@ -44,3 +44,6 @@ build/
 #AGENTS
 .AGENTS.md
 
+##Load tests readme
+load-tests/README.md
+
