@@ -1,0 +1,430 @@
+ Container failureintel-db-loadtest Running 
+ Container failureintel-api-loadtest Running 
+ Container failureintel-db-loadtest Waiting 
+ Container failureintel-db-loadtest Healthy 
+ Container failureintel-api-loadtest Waiting 
+ Container failureintel-api-loadtest Healthy 
+ Container failureintel-loadtest-k6-run-c153a29fa430 Creating 
+ Container failureintel-loadtest-k6-run-c153a29fa430 Created 
+
+         /\      Grafana   /ΓÇ╛ΓÇ╛/  
+    /\  /  \     |\  __   /  /   
+   /  \/    \    | |/ /  /   ΓÇ╛ΓÇ╛\ 
+  /          \   |   (  |  (ΓÇ╛)  |
+ / __________ \  |_|\_\  \_____/ 
+
+
+     execution: local
+        script: /scripts/ingestion.js
+        output: -
+
+     scenarios: (100.00%) 1 scenario, 100 max VUs, 2m30s max duration (incl. graceful stop):
+              * ingestion: 20.00 iterations/s for 2m0s (maxVUs: 20-100, gracefulStop: 30s)
+
+
+running (0m01.0s), 000/020 VUs, 20 complete and 0 interrupted iterations
+ingestion   [   1% ] 000/020 VUs  0m01.0s/2m0s  20.00 iters/s
+
+running (0m02.0s), 001/020 VUs, 39 complete and 0 interrupted iterations
+ingestion   [   2% ] 001/020 VUs  0m02.0s/2m0s  20.00 iters/s
+
+running (0m03.0s), 000/020 VUs, 60 complete and 0 interrupted iterations
+ingestion   [   2% ] 000/020 VUs  0m03.0s/2m0s  20.00 iters/s
+
+running (0m04.0s), 000/020 VUs, 80 complete and 0 interrupted iterations
+ingestion   [   3% ] 000/020 VUs  0m04.0s/2m0s  20.00 iters/s
+
+running (0m05.0s), 000/020 VUs, 100 complete and 0 interrupted iterations
+ingestion   [   4% ] 000/020 VUs  0m05.0s/2m0s  20.00 iters/s
+
+running (0m06.0s), 000/020 VUs, 120 complete and 0 interrupted iterations
+ingestion   [   5% ] 000/020 VUs  0m06.0s/2m0s  20.00 iters/s
+
+running (0m07.0s), 000/020 VUs, 140 complete and 0 interrupted iterations
+ingestion   [   6% ] 000/020 VUs  0m07.0s/2m0s  20.00 iters/s
+
+running (0m08.0s), 000/020 VUs, 160 complete and 0 interrupted iterations
+ingestion   [   7% ] 000/020 VUs  0m08.0s/2m0s  20.00 iters/s
+
+running (0m09.0s), 000/020 VUs, 180 complete and 0 interrupted iterations
+ingestion   [   7% ] 000/020 VUs  0m09.0s/2m0s  20.00 iters/s
+
+running (0m10.0s), 000/020 VUs, 200 complete and 0 interrupted iterations
+ingestion   [   8% ] 000/020 VUs  0m10.0s/2m0s  20.00 iters/s
+
+running (0m11.0s), 000/020 VUs, 220 complete and 0 interrupted iterations
+ingestion   [   9% ] 000/020 VUs  0m11.0s/2m0s  20.00 iters/s
+
+running (0m12.0s), 000/020 VUs, 240 complete and 0 interrupted iterations
+ingestion   [  10% ] 000/020 VUs  0m12.0s/2m0s  20.00 iters/s
+
+running (0m13.0s), 000/020 VUs, 260 complete and 0 interrupted iterations
+ingestion   [  11% ] 000/020 VUs  0m13.0s/2m0s  20.00 iters/s
+
+running (0m14.0s), 000/020 VUs, 280 complete and 0 interrupted iterations
+ingestion   [  12% ] 000/020 VUs  0m14.0s/2m0s  20.00 iters/s
+
+running (0m15.0s), 000/020 VUs, 300 complete and 0 interrupted iterations
+ingestion   [  12% ] 000/020 VUs  0m15.0s/2m0s  20.00 iters/s
+
+running (0m16.0s), 000/020 VUs, 320 complete and 0 interrupted iterations
+ingestion   [  13% ] 000/020 VUs  0m16.0s/2m0s  20.00 iters/s
+
+running (0m17.0s), 000/020 VUs, 340 complete and 0 interrupted iterations
+ingestion   [  14% ] 000/020 VUs  0m17.0s/2m0s  20.00 iters/s
+
+running (0m18.0s), 000/020 VUs, 360 complete and 0 interrupted iterations
+ingestion   [  15% ] 000/020 VUs  0m18.0s/2m0s  20.00 iters/s
+
+running (0m19.0s), 000/020 VUs, 380 complete and 0 interrupted iterations
+ingestion   [  16% ] 000/020 VUs  0m19.0s/2m0s  20.00 iters/s
+
+running (0m20.0s), 000/020 VUs, 400 complete and 0 interrupted iterations
+ingestion   [  17% ] 000/020 VUs  0m20.0s/2m0s  20.00 iters/s
+
+running (0m21.0s), 000/020 VUs, 420 complete and 0 interrupted iterations
+ingestion   [  17% ] 000/020 VUs  0m21.0s/2m0s  20.00 iters/s
+
+running (0m22.0s), 000/020 VUs, 440 complete and 0 interrupted iterations
+ingestion   [  18% ] 000/020 VUs  0m22.0s/2m0s  20.00 iters/s
+
+running (0m23.0s), 000/020 VUs, 460 complete and 0 interrupted iterations
+ingestion   [  19% ] 000/020 VUs  0m23.0s/2m0s  20.00 iters/s
+
+running (0m24.0s), 000/020 VUs, 480 complete and 0 interrupted iterations
+ingestion   [  20% ] 000/020 VUs  0m24.0s/2m0s  20.00 iters/s
+
+running (0m25.0s), 000/020 VUs, 500 complete and 0 interrupted iterations
+ingestion   [  21% ] 000/020 VUs  0m25.0s/2m0s  20.00 iters/s
+
+running (0m26.0s), 000/020 VUs, 520 complete and 0 interrupted iterations
+ingestion   [  22% ] 000/020 VUs  0m26.0s/2m0s  20.00 iters/s
+
+running (0m27.0s), 000/020 VUs, 540 complete and 0 interrupted iterations
+ingestion   [  22% ] 000/020 VUs  0m27.0s/2m0s  20.00 iters/s
+
+running (0m28.0s), 000/020 VUs, 560 complete and 0 interrupted iterations
+ingestion   [  23% ] 000/020 VUs  0m28.0s/2m0s  20.00 iters/s
+
+running (0m29.0s), 000/020 VUs, 580 complete and 0 interrupted iterations
+ingestion   [  24% ] 000/020 VUs  0m29.0s/2m0s  20.00 iters/s
+
+running (0m30.0s), 000/020 VUs, 600 complete and 0 interrupted iterations
+ingestion   [  25% ] 000/020 VUs  0m30.0s/2m0s  20.00 iters/s
+
+running (0m31.0s), 000/020 VUs, 620 complete and 0 interrupted iterations
+ingestion   [  26% ] 000/020 VUs  0m31.0s/2m0s  20.00 iters/s
+
+running (0m32.0s), 000/020 VUs, 640 complete and 0 interrupted iterations
+ingestion   [  27% ] 000/020 VUs  0m32.0s/2m0s  20.00 iters/s
+
+running (0m33.0s), 000/020 VUs, 660 complete and 0 interrupted iterations
+ingestion   [  27% ] 000/020 VUs  0m33.0s/2m0s  20.00 iters/s
+
+running (0m34.0s), 000/020 VUs, 680 complete and 0 interrupted iterations
+ingestion   [  28% ] 000/020 VUs  0m34.0s/2m0s  20.00 iters/s
+
+running (0m35.0s), 000/020 VUs, 700 complete and 0 interrupted iterations
+ingestion   [  29% ] 000/020 VUs  0m35.0s/2m0s  20.00 iters/s
+
+running (0m36.0s), 000/020 VUs, 720 complete and 0 interrupted iterations
+ingestion   [  30% ] 000/020 VUs  0m36.0s/2m0s  20.00 iters/s
+
+running (0m37.0s), 000/020 VUs, 740 complete and 0 interrupted iterations
+ingestion   [  31% ] 000/020 VUs  0m37.0s/2m0s  20.00 iters/s
+
+running (0m38.0s), 000/020 VUs, 760 complete and 0 interrupted iterations
+ingestion   [  32% ] 000/020 VUs  0m38.0s/2m0s  20.00 iters/s
+
+running (0m39.0s), 000/020 VUs, 780 complete and 0 interrupted iterations
+ingestion   [  32% ] 000/020 VUs  0m39.0s/2m0s  20.00 iters/s
+
+running (0m40.0s), 000/020 VUs, 800 complete and 0 interrupted iterations
+ingestion   [  33% ] 000/020 VUs  0m40.0s/2m0s  20.00 iters/s
+
+running (0m41.0s), 000/020 VUs, 820 complete and 0 interrupted iterations
+ingestion   [  34% ] 000/020 VUs  0m41.0s/2m0s  20.00 iters/s
+
+running (0m42.0s), 000/020 VUs, 840 complete and 0 interrupted iterations
+ingestion   [  35% ] 000/020 VUs  0m42.0s/2m0s  20.00 iters/s
+
+running (0m43.0s), 000/020 VUs, 860 complete and 0 interrupted iterations
+ingestion   [  36% ] 000/020 VUs  0m43.0s/2m0s  20.00 iters/s
+
+running (0m44.0s), 000/020 VUs, 880 complete and 0 interrupted iterations
+ingestion   [  37% ] 000/020 VUs  0m44.0s/2m0s  20.00 iters/s
+
+running (0m45.0s), 000/020 VUs, 900 complete and 0 interrupted iterations
+ingestion   [  37% ] 000/020 VUs  0m45.0s/2m0s  20.00 iters/s
+
+running (0m46.0s), 000/020 VUs, 920 complete and 0 interrupted iterations
+ingestion   [  38% ] 000/020 VUs  0m46.0s/2m0s  20.00 iters/s
+
+running (0m47.0s), 000/020 VUs, 940 complete and 0 interrupted iterations
+ingestion   [  39% ] 000/020 VUs  0m47.0s/2m0s  20.00 iters/s
+
+running (0m48.0s), 000/020 VUs, 960 complete and 0 interrupted iterations
+ingestion   [  40% ] 000/020 VUs  0m48.0s/2m0s  20.00 iters/s
+
+running (0m49.0s), 000/020 VUs, 980 complete and 0 interrupted iterations
+ingestion   [  41% ] 000/020 VUs  0m49.0s/2m0s  20.00 iters/s
+
+running (0m50.0s), 000/020 VUs, 1000 complete and 0 interrupted iterations
+ingestion   [  42% ] 000/020 VUs  0m50.0s/2m0s  20.00 iters/s
+
+running (0m51.0s), 000/020 VUs, 1020 complete and 0 interrupted iterations
+ingestion   [  42% ] 000/020 VUs  0m51.0s/2m0s  20.00 iters/s
+
+running (0m52.0s), 000/020 VUs, 1040 complete and 0 interrupted iterations
+ingestion   [  43% ] 000/020 VUs  0m52.0s/2m0s  20.00 iters/s
+
+running (0m53.0s), 000/020 VUs, 1060 complete and 0 interrupted iterations
+ingestion   [  44% ] 000/020 VUs  0m53.0s/2m0s  20.00 iters/s
+
+running (0m54.0s), 000/020 VUs, 1080 complete and 0 interrupted iterations
+ingestion   [  45% ] 000/020 VUs  0m54.0s/2m0s  20.00 iters/s
+
+running (0m55.0s), 000/020 VUs, 1100 complete and 0 interrupted iterations
+ingestion   [  46% ] 000/020 VUs  0m55.0s/2m0s  20.00 iters/s
+
+running (0m56.0s), 000/020 VUs, 1120 complete and 0 interrupted iterations
+ingestion   [  47% ] 000/020 VUs  0m56.0s/2m0s  20.00 iters/s
+
+running (0m57.0s), 000/020 VUs, 1140 complete and 0 interrupted iterations
+ingestion   [  47% ] 000/020 VUs  0m57.0s/2m0s  20.00 iters/s
+
+running (0m58.0s), 000/020 VUs, 1160 complete and 0 interrupted iterations
+ingestion   [  48% ] 000/020 VUs  0m58.0s/2m0s  20.00 iters/s
+
+running (0m59.0s), 000/020 VUs, 1180 complete and 0 interrupted iterations
+ingestion   [  49% ] 000/020 VUs  0m59.0s/2m0s  20.00 iters/s
+
+running (1m00.0s), 000/020 VUs, 1200 complete and 0 interrupted iterations
+ingestion   [  50% ] 000/020 VUs  1m00.0s/2m0s  20.00 iters/s
+
+running (1m01.0s), 000/020 VUs, 1220 complete and 0 interrupted iterations
+ingestion   [  51% ] 000/020 VUs  1m01.0s/2m0s  20.00 iters/s
+
+running (1m02.0s), 000/020 VUs, 1240 complete and 0 interrupted iterations
+ingestion   [  52% ] 000/020 VUs  1m02.0s/2m0s  20.00 iters/s
+
+running (1m03.0s), 000/020 VUs, 1260 complete and 0 interrupted iterations
+ingestion   [  52% ] 000/020 VUs  1m03.0s/2m0s  20.00 iters/s
+
+running (1m04.0s), 000/020 VUs, 1280 complete and 0 interrupted iterations
+ingestion   [  53% ] 000/020 VUs  1m04.0s/2m0s  20.00 iters/s
+
+running (1m05.0s), 000/020 VUs, 1300 complete and 0 interrupted iterations
+ingestion   [  54% ] 000/020 VUs  1m05.0s/2m0s  20.00 iters/s
+
+running (1m06.0s), 000/020 VUs, 1320 complete and 0 interrupted iterations
+ingestion   [  55% ] 000/020 VUs  1m06.0s/2m0s  20.00 iters/s
+
+running (1m07.0s), 000/020 VUs, 1340 complete and 0 interrupted iterations
+ingestion   [  56% ] 000/020 VUs  1m07.0s/2m0s  20.00 iters/s
+
+running (1m08.0s), 000/020 VUs, 1360 complete and 0 interrupted iterations
+ingestion   [  57% ] 000/020 VUs  1m08.0s/2m0s  20.00 iters/s
+
+running (1m09.0s), 000/020 VUs, 1380 complete and 0 interrupted iterations
+ingestion   [  57% ] 000/020 VUs  1m09.0s/2m0s  20.00 iters/s
+
+running (1m10.0s), 000/020 VUs, 1400 complete and 0 interrupted iterations
+ingestion   [  58% ] 000/020 VUs  1m10.0s/2m0s  20.00 iters/s
+
+running (1m11.0s), 000/020 VUs, 1420 complete and 0 interrupted iterations
+ingestion   [  59% ] 000/020 VUs  1m11.0s/2m0s  20.00 iters/s
+
+running (1m12.0s), 000/020 VUs, 1440 complete and 0 interrupted iterations
+ingestion   [  60% ] 000/020 VUs  1m12.0s/2m0s  20.00 iters/s
+
+running (1m13.0s), 001/020 VUs, 1459 complete and 0 interrupted iterations
+ingestion   [  61% ] 001/020 VUs  1m13.0s/2m0s  20.00 iters/s
+
+running (1m14.0s), 000/020 VUs, 1480 complete and 0 interrupted iterations
+ingestion   [  62% ] 000/020 VUs  1m14.0s/2m0s  20.00 iters/s
+
+running (1m15.0s), 000/020 VUs, 1500 complete and 0 interrupted iterations
+ingestion   [  62% ] 000/020 VUs  1m15.0s/2m0s  20.00 iters/s
+
+running (1m16.0s), 000/020 VUs, 1520 complete and 0 interrupted iterations
+ingestion   [  63% ] 000/020 VUs  1m16.0s/2m0s  20.00 iters/s
+
+running (1m17.0s), 000/020 VUs, 1540 complete and 0 interrupted iterations
+ingestion   [  64% ] 000/020 VUs  1m17.0s/2m0s  20.00 iters/s
+
+running (1m18.0s), 000/020 VUs, 1560 complete and 0 interrupted iterations
+ingestion   [  65% ] 000/020 VUs  1m18.0s/2m0s  20.00 iters/s
+
+running (1m19.0s), 000/020 VUs, 1580 complete and 0 interrupted iterations
+ingestion   [  66% ] 000/020 VUs  1m19.0s/2m0s  20.00 iters/s
+
+running (1m20.0s), 000/020 VUs, 1600 complete and 0 interrupted iterations
+ingestion   [  67% ] 000/020 VUs  1m20.0s/2m0s  20.00 iters/s
+
+running (1m21.0s), 000/020 VUs, 1620 complete and 0 interrupted iterations
+ingestion   [  67% ] 000/020 VUs  1m21.0s/2m0s  20.00 iters/s
+
+running (1m22.0s), 001/020 VUs, 1639 complete and 0 interrupted iterations
+ingestion   [  68% ] 001/020 VUs  1m22.0s/2m0s  20.00 iters/s
+
+running (1m23.0s), 000/020 VUs, 1660 complete and 0 interrupted iterations
+ingestion   [  69% ] 000/020 VUs  1m23.0s/2m0s  20.00 iters/s
+
+running (1m24.0s), 000/020 VUs, 1680 complete and 0 interrupted iterations
+ingestion   [  70% ] 000/020 VUs  1m24.0s/2m0s  20.00 iters/s
+
+running (1m25.0s), 000/020 VUs, 1700 complete and 0 interrupted iterations
+ingestion   [  71% ] 000/020 VUs  1m25.0s/2m0s  20.00 iters/s
+
+running (1m26.0s), 000/020 VUs, 1720 complete and 0 interrupted iterations
+ingestion   [  72% ] 000/020 VUs  1m26.0s/2m0s  20.00 iters/s
+
+running (1m27.0s), 000/020 VUs, 1740 complete and 0 interrupted iterations
+ingestion   [  72% ] 000/020 VUs  1m27.0s/2m0s  20.00 iters/s
+
+running (1m28.0s), 000/020 VUs, 1760 complete and 0 interrupted iterations
+ingestion   [  73% ] 000/020 VUs  1m28.0s/2m0s  20.00 iters/s
+
+running (1m29.0s), 000/020 VUs, 1780 complete and 0 interrupted iterations
+ingestion   [  74% ] 000/020 VUs  1m29.0s/2m0s  20.00 iters/s
+
+running (1m30.0s), 000/020 VUs, 1800 complete and 0 interrupted iterations
+ingestion   [  75% ] 000/020 VUs  1m30.0s/2m0s  20.00 iters/s
+
+running (1m31.0s), 000/020 VUs, 1820 complete and 0 interrupted iterations
+ingestion   [  76% ] 000/020 VUs  1m31.0s/2m0s  20.00 iters/s
+
+running (1m32.0s), 000/020 VUs, 1840 complete and 0 interrupted iterations
+ingestion   [  77% ] 000/020 VUs  1m32.0s/2m0s  20.00 iters/s
+
+running (1m33.0s), 000/020 VUs, 1860 complete and 0 interrupted iterations
+ingestion   [  77% ] 000/020 VUs  1m33.0s/2m0s  20.00 iters/s
+
+running (1m34.0s), 000/020 VUs, 1880 complete and 0 interrupted iterations
+ingestion   [  78% ] 000/020 VUs  1m34.0s/2m0s  20.00 iters/s
+
+running (1m35.0s), 000/020 VUs, 1900 complete and 0 interrupted iterations
+ingestion   [  79% ] 000/020 VUs  1m35.0s/2m0s  20.00 iters/s
+
+running (1m36.0s), 000/020 VUs, 1920 complete and 0 interrupted iterations
+ingestion   [  80% ] 000/020 VUs  1m36.0s/2m0s  20.00 iters/s
+
+running (1m37.0s), 000/020 VUs, 1940 complete and 0 interrupted iterations
+ingestion   [  81% ] 000/020 VUs  1m37.0s/2m0s  20.00 iters/s
+
+running (1m38.0s), 000/020 VUs, 1960 complete and 0 interrupted iterations
+ingestion   [  82% ] 000/020 VUs  1m38.0s/2m0s  20.00 iters/s
+
+running (1m39.0s), 000/020 VUs, 1980 complete and 0 interrupted iterations
+ingestion   [  82% ] 000/020 VUs  1m39.0s/2m0s  20.00 iters/s
+
+running (1m40.0s), 000/020 VUs, 2000 complete and 0 interrupted iterations
+ingestion   [  83% ] 000/020 VUs  1m40.0s/2m0s  20.00 iters/s
+
+running (1m41.0s), 000/020 VUs, 2020 complete and 0 interrupted iterations
+ingestion   [  84% ] 000/020 VUs  1m41.0s/2m0s  20.00 iters/s
+
+running (1m42.0s), 000/020 VUs, 2040 complete and 0 interrupted iterations
+ingestion   [  85% ] 000/020 VUs  1m42.0s/2m0s  20.00 iters/s
+
+running (1m43.0s), 000/020 VUs, 2060 complete and 0 interrupted iterations
+ingestion   [  86% ] 000/020 VUs  1m43.0s/2m0s  20.00 iters/s
+
+running (1m44.0s), 000/020 VUs, 2080 complete and 0 interrupted iterations
+ingestion   [  87% ] 000/020 VUs  1m44.0s/2m0s  20.00 iters/s
+
+running (1m45.0s), 000/020 VUs, 2100 complete and 0 interrupted iterations
+ingestion   [  87% ] 000/020 VUs  1m45.0s/2m0s  20.00 iters/s
+
+running (1m46.0s), 002/020 VUs, 2118 complete and 0 interrupted iterations
+ingestion   [  88% ] 002/020 VUs  1m46.0s/2m0s  20.00 iters/s
+
+running (1m47.0s), 000/020 VUs, 2140 complete and 0 interrupted iterations
+ingestion   [  89% ] 000/020 VUs  1m47.0s/2m0s  20.00 iters/s
+
+running (1m48.0s), 000/020 VUs, 2160 complete and 0 interrupted iterations
+ingestion   [  90% ] 000/020 VUs  1m48.0s/2m0s  20.00 iters/s
+
+running (1m49.0s), 000/020 VUs, 2180 complete and 0 interrupted iterations
+ingestion   [  91% ] 000/020 VUs  1m49.0s/2m0s  20.00 iters/s
+
+running (1m50.0s), 000/020 VUs, 2200 complete and 0 interrupted iterations
+ingestion   [  92% ] 000/020 VUs  1m50.0s/2m0s  20.00 iters/s
+
+running (1m51.0s), 000/020 VUs, 2220 complete and 0 interrupted iterations
+ingestion   [  92% ] 000/020 VUs  1m51.0s/2m0s  20.00 iters/s
+
+running (1m52.0s), 000/020 VUs, 2240 complete and 0 interrupted iterations
+ingestion   [  93% ] 000/020 VUs  1m52.0s/2m0s  20.00 iters/s
+
+running (1m53.0s), 000/020 VUs, 2260 complete and 0 interrupted iterations
+ingestion   [  94% ] 000/020 VUs  1m53.0s/2m0s  20.00 iters/s
+
+running (1m54.0s), 000/020 VUs, 2280 complete and 0 interrupted iterations
+ingestion   [  95% ] 000/020 VUs  1m54.0s/2m0s  20.00 iters/s
+
+running (1m55.0s), 000/020 VUs, 2300 complete and 0 interrupted iterations
+ingestion   [  96% ] 000/020 VUs  1m55.0s/2m0s  20.00 iters/s
+
+running (1m56.0s), 000/020 VUs, 2320 complete and 0 interrupted iterations
+ingestion   [  97% ] 000/020 VUs  1m56.0s/2m0s  20.00 iters/s
+
+running (1m57.0s), 000/020 VUs, 2340 complete and 0 interrupted iterations
+ingestion   [  97% ] 000/020 VUs  1m57.0s/2m0s  20.00 iters/s
+
+running (1m58.0s), 000/020 VUs, 2360 complete and 0 interrupted iterations
+ingestion   [  98% ] 000/020 VUs  1m58.0s/2m0s  20.00 iters/s
+
+running (1m59.0s), 000/020 VUs, 2380 complete and 0 interrupted iterations
+ingestion   [  99% ] 000/020 VUs  1m59.0s/2m0s  20.00 iters/s
+
+running (2m00.0s), 000/020 VUs, 2400 complete and 0 interrupted iterations
+ingestion   [ 100% ] 000/020 VUs  2m00.0s/2m0s  20.00 iters/s
+
+
+  Γûê THRESHOLDS 
+
+    dropped_iterations
+    Γ£ô 'count==0' count=0
+
+    ingestion_success_rate
+    Γ£ô 'rate==1' rate=100.00%
+
+
+  Γûê TOTAL RESULTS 
+
+    checks_total.......: 7203    60.018721/s
+    checks_succeeded...: 100.00% 7203 out of 7203
+    checks_failed......: 0.00%   0 out of 7203
+
+    Γ£ô HTTP 202
+    Γ£ô eventId present
+    Γ£ô status RECEIVED
+
+    CUSTOM
+    ingestion_accepted.............: 2401    20.00624/s
+    ingestion_success_rate.........: 100.00% 2401 out of 2401
+
+    HTTP
+    http_req_duration..............: avg=22.94ms min=10.21ms med=19.84ms max=251.58ms p(90)=31.65ms p(95)=40.17ms
+      { expected_response:true }...: avg=22.94ms min=10.21ms med=19.84ms max=251.58ms p(90)=31.65ms p(95)=40.17ms
+    http_req_failed................: 0.00%   0 out of 2401
+    http_reqs......................: 2401    20.00624/s
+
+    EXECUTION
+    dropped_iterations.............: 0       0/s
+    iteration_duration.............: avg=23.31ms min=10.5ms  med=20.18ms max=253.84ms p(90)=32.05ms p(95)=40.46ms
+    iterations.....................: 2401    20.00624/s
+    vus............................: 0       min=0            max=2 
+    vus_max........................: 20      min=20           max=20
+
+    NETWORK
+    data_received..................: 723 kB  6.0 kB/s
+    data_sent......................: 1.4 MB  12 kB/s
+
+
+
+
+running (2m00.0s), 000/020 VUs, 2401 complete and 0 interrupted iterations
+ingestion Γ£ô [ 100% ] 000/020 VUs  2m0s  20.00 iters/s
