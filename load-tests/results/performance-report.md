@@ -172,7 +172,7 @@
 
 ## Load Test — 40 req/s
 
-**Run ID:** `rate40-c4-b6-002-k6`  
+**Run ID:** `rate40-c4-b6-001-k6`  
 **Configuration:** 40 req/s for 120 seconds; worker enabled; **C=4, B=6**.
 
 ### k6 Results
