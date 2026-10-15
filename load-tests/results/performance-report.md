@@ -17,7 +17,7 @@
 | Test | C | B | Duration | HTTP 202 | Achieved req/s | HTTP p95 | HTTP failures | Dropped | Result |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---|
 | Smoke — 1 req/s | 1 | 1 | 30s | 31 | 1.031 | 135.21 ms | 0 | 0 | PASS |
-| 5 req/s | 1 | 1 | 120s | 601 | 5.007 | 74.84 ms | 0 | 0 | PASS |
+| 5 req/s | 3 | 5 | 120s | 601 | 5.008 | 69.29 ms | 0 | 0 | PASS |
 | 10 req/s | 1 | 1 | 120s | 1,201 | 10.008 | 36.69 ms | 0 | 0 | PASS |
 | 20 req/s | 4 | 6 | 120s | 2,401 | 20.00624 | 40.17 ms | 0 | 0 | PASS |
 | 40 req/s | 4 | 6 | 120s | 4,801 | 40.0006 | 65.93 ms | 0 | 0 | PASS |
@@ -28,7 +28,7 @@
 - **Final database reconciliation** verifies eventual normalization and checks for missing or duplicate normalized rows.
 - **PASS** means ingestion checks and final reconciliation passed. It does **not** imply the normalization worker sustained the offered request rate throughout the test.
 - Results reflect the dedicated local Docker environment, not production capacity.
-- Concurrency and batch size were changed together for the 20 and 40 req/s runs; their individual effects cannot be isolated.
+- Worker configurations differed across test rates (C=1/B=1 at smoke and 10 req/s; C=3/B=5 at 5 req/s; C=4/B=6 at 20 and 40 req/s). The individual effects of worker concurrency and batch size cannot be isolated.
 
 ## Smoke Test — 1 req/s
 
@@ -62,21 +62,22 @@
 
 ## Load Test — 5 req/s
 
-**Run ID:** `rate5-001`  
-**Configuration:** 5 req/s for 120 seconds; **C=1, B=1**.
+**Run ID:** `rate5-c3-b5-001`  
+**Configuration:** 5 req/s for 120 seconds; worker enabled; **C=3, B=5**.
 
 ### k6 Results
 
 | Metric | Observed |
 |---|---:|
 | HTTP requests / HTTP 202 | 601 / 601 |
-| Achieved throughput | 5.007 req/s |
+| Achieved throughput | 5.008029 req/s |
 | Ingestion success rate | 100% |
-| HTTP average | 40.93 ms |
-| HTTP median | 35.28 ms |
-| HTTP p90 | 64.26 ms |
-| HTTP p95 | 74.84 ms |
-| HTTP maximum | 376.09 ms |
+| HTTP average | 43.92 ms |
+| HTTP median | 42.29 ms |
+| HTTP p90 | 59.59 ms |
+| HTTP p95 | 69.29 ms |
+| HTTP maximum | 377.21 ms |
+| Iteration p95 | 69.55 ms |
 | Checks passed | 1,803 / 1,803 |
 | HTTP failures | 0 |
 | Dropped iterations | 0 |
@@ -87,13 +88,14 @@
 |---|---:|
 | Raw events | 601 |
 | NORMALIZED events | 601 |
-| Normalized rows | 601 |
+| Normalized rows | Not independently verified for this run |
+| Unique normalized events | Not independently verified for this run |
 | Pending events | 0 |
 | Failed events | 0 |
 
-**Assessment: PASS.** All 601 accepted events were persisted and normalized, with zero pending or failed events.
+**Assessment: PASS for ingestion and final raw-event processing status.** All 601 requests passed k6 checks, with zero HTTP failures or dropped iterations. The run-specific status query on October 15, 2026 at 11:39:23 showed 601 NORMALIZED events and no other statuses. One-to-one normalized-row reconciliation was not separately supplied for this run.
 
-**Evidence:** k6 console summary and run-specific PostgreSQL reconciliation for `rate5-001`.
+**Evidence:** `results/raw_logs/rate5-c3-b5-001-k6.txt`; run-specific PostgreSQL processing-status query.
 
 ## Load Test — 10 req/s
 
