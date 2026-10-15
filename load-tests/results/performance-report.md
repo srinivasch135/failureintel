@@ -1,109 +1,127 @@
 # FailureIntel — Load Test Results
 
-## 1. Test Environment
+## Test Environment
 
 | Component | Configuration |
 |---|---|
 | Application | Spring Boot / Java 17 |
 | Database | PostgreSQL 16 |
-| Infrastructure | Docker Compose |
+| Infrastructure | Dedicated local Docker Compose environment |
 | Load generator | Grafana k6 |
-| Worker concurrency | 1 (baseline); 4 (comparison) |
-| Worker batch size | 1 (baseline); 6 (comparison) |
-| Test environment | Dedicated local environment |
+| Worker configuration | Specified separately for each test |
 
-## 2. Performance Measurements
+**Worker configuration notation:** **C** = worker concurrency (number of worker execution slots); **B** = worker batch size (maximum events claimed per batch). For example, **C=4, B=6** means concurrency 4 and batch size 6. These are worker settings, not k6 virtual users.
 
-| Target rate | Duration | HTTP 202 | Achieved req/s | HTTP p95 | Errors | Dropped |
-|---|---|---|---|---|---|---|
-| 1 req/s | 30s | 31 | 1.031 | 135.21 ms | 0 | 0 |
-| 5 req/s | 120s | 601 | 5.007 | 74.84 ms | 0 | 0 |
-| 10 req/s | 120s | 1201 | 10.008 | 36.69 ms | 0 | 0 |
-| 20 req/s (1/1) | 120s | 1 of 2,401 checks | 20.003 | 12.06 ms | 2,400 failed HTTP 202 checks | 0 |
-| 20 req/s (4/6) | 120s | 2,400 | 19.9986 | 44.36 ms | 0 | 0 |
-| 40 req/s (4/6) | 120s | 4,801 | 40.0006 | 65.93 ms | 0 | 0 |
+## Results Summary
 
-## 3. Data Integrity Verification
+| Test | C | B | Duration | HTTP 202 | Achieved req/s | HTTP p95 | HTTP failures | Dropped | Result |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| Smoke — 1 req/s | 1 | 1 | 30s | 31 | 1.031 | 135.21 ms | 0 | 0 | PASS |
+| 5 req/s | 1 | 1 | 120s | 601 | 5.007 | 74.84 ms | 0 | 0 | PASS |
+| 10 req/s | 1 | 1 | 120s | 1,201 | 10.008 | 36.69 ms | 0 | 0 | PASS |
+| 20 req/s | 4 | 6 | 120s | 2,400 | 19.9986 | 44.36 ms | 0 | 0 | PASS |
+| 40 req/s | 4 | 6 | 120s | 4,801 | 40.0006 | 65.93 ms | 0 | 0 | PASS |
 
-**Run ID:** `smoke-163-002`
+## Measurement Scope
 
-| Verification | Observed |
+- **HTTP 202 and latency** measure the synchronous ingestion request-response path.
+- **Final database reconciliation** verifies eventual normalization and checks for missing or duplicate normalized rows.
+- **PASS** means ingestion checks and final reconciliation passed. It does **not** imply the normalization worker sustained the offered request rate throughout the test.
+- Results reflect the dedicated local Docker environment, not production capacity.
+- Concurrency and batch size were changed together for the 20 and 40 req/s runs; their individual effects cannot be isolated.
+
+## Smoke Test — 1 req/s
+
+**Run ID:** `smoke-163-002`  
+**Configuration:** 1 req/s for 30 seconds; **C=1, B=1**.
+
+### k6 Results
+
+| Metric | Observed |
 |---|---:|
-| Committed raw events | 31 |
+| HTTP requests / HTTP 202 | 31 / 31 |
+| Achieved throughput | 1.031 req/s |
+| HTTP p95 | 135.21 ms |
+| HTTP failures | 0 |
+| Dropped iterations | 0 |
+
+### Final Database Reconciliation
+
+| Metric | Observed |
+|---|---:|
+| Raw events | 31 |
 | NORMALIZED events | 31 |
 | Normalized rows | 31 |
-| Unique normalized event IDs | 31 |
+| Unique normalized events | 31 |
 | Pending events | 0 |
 | Failed events | 0 |
 
-**Result: PASS**
+**Assessment: PASS.** All accepted events were persisted and normalized once.
 
-All 31 HTTP-accepted events were durably persisted and normalized. Each has exactly one corresponding normalized row.
+**Evidence:** `smoke-163-002.txt`; run-specific PostgreSQL reconciliation.
 
-## 4. Measurement Scope
-
-- HTTP p95 represents ingestion request-response latency.
-- Database reconciliation verifies eventual normalization correctness.
-- Final run-specific backlog reached zero.
-- During-run backlog progression was not recorded for baseline runs. Untimed processing snapshots were collected for the 4/6 comparison.
-- Results represent local Docker performance, not production capacity.
-- Eventual backlog drainage does not prove sustainable normalization throughput at the offered rate.
-
-## 5. Evidence
-
-- k6 output: `smoke-163-002.txt`
-- PostgreSQL reconciliation: run ID `smoke-163-002`
-
-## 6. Load Test — 5 req/s
+## Load Test — 5 req/s
 
 **Run ID:** `rate5-001`  
-**Execution:** 120 seconds at 5 iterations/s; 601 completed, 0 interrupted.  
-**HTTP checks:** 1,803/1,803 passed; 601/601 HTTP 202 accepted.  
-**HTTP latency:** average 40.93 ms; median 35.28 ms; p90 64.26 ms; p95 74.84 ms; maximum 376.09 ms.  
-**Dropped iterations:** 0; **HTTP failures:** 0.
+**Configuration:** 5 req/s for 120 seconds; **C=1, B=1**.
 
-| Reconciliation metric | Observed |
+### k6 Results
+
+| Metric | Observed |
 |---|---:|
-| Committed raw events | 601 |
+| HTTP requests / HTTP 202 | 601 / 601 |
+| Achieved throughput | 5.007 req/s |
+| Ingestion success rate | 100% |
+| HTTP average | 40.93 ms |
+| HTTP median | 35.28 ms |
+| HTTP p90 | 64.26 ms |
+| HTTP p95 | 74.84 ms |
+| HTTP maximum | 376.09 ms |
+| Checks passed | 1,803 / 1,803 |
+| HTTP failures | 0 |
+| Dropped iterations | 0 |
+
+### Final Database Reconciliation
+
+| Metric | Observed |
+|---|---:|
+| Raw events | 601 |
 | NORMALIZED events | 601 |
 | Normalized rows | 601 |
 | Pending events | 0 |
 | Failed events | 0 |
 
-**Result: Ingestion and observed reconciliation checks PASS.** All 601 accepted events were persisted and marked NORMALIZED, with 601 normalized rows and no pending or failed events.
+**Assessment: PASS.** All 601 accepted events were persisted and normalized, with zero pending or failed events.
 
-**Evidence:** k6 console summary and run-specific SQL reconciliation for `rate5-001`.
+**Evidence:** k6 console summary and run-specific PostgreSQL reconciliation for `rate5-001`.
 
-## 7. Load Test — 10 req/s
+## Load Test — 10 req/s
 
 **Run ID:** `rate10-001`  
-**Duration:** 120 seconds  
-**Target rate:** 10 req/s  
-**Worker concurrency:** 1  
-**Worker batch size:** 1
+**Configuration:** 10 req/s for 120 seconds; **C=1, B=1**.
 
-### Performance results
+### k6 Results
 
 | Metric | Observed |
 |---|---:|
-| Total HTTP requests | 1,201 |
-| HTTP 202 responses | 1,201 |
+| HTTP requests / HTTP 202 | 1,201 / 1,201 |
 | Achieved throughput | 10.008 req/s |
-| HTTP average latency | 20.04 ms |
-| HTTP median latency | 17.24 ms |
-| HTTP p90 latency | 28.02 ms |
-| HTTP p95 latency | 36.69 ms |
-| HTTP maximum latency | 310.28 ms |
+| Ingestion success rate | 100% |
+| HTTP average | 20.04 ms |
+| HTTP median | 17.24 ms |
+| HTTP p90 | 28.02 ms |
+| HTTP p95 | 36.69 ms |
+| HTTP maximum | 310.28 ms |
 | Iteration p95 | 37.12 ms |
 | Peak active VUs | 2 |
 | Preallocated VUs | 20 |
+| Checks passed | 3,603 / 3,603 |
 | HTTP failures | 0 |
 | Dropped iterations | 0 |
-| Checks passed | 3,603 / 3,603 |
 
-### Database reconciliation
+### Final Database Reconciliation
 
-| Metric | Final result |
+| Metric | Observed |
 |---|---:|
 | Raw events | 1,201 |
 | NORMALIZED events | 1,201 |
@@ -111,154 +129,80 @@ All 31 HTTP-accepted events were durably persisted and normalized. Each has exac
 | Pending events | 0 |
 | Failed events | 0 |
 
-**Result: PASS**
+**Assessment: PASS.** All accepted events were normalized, with no pending or failed events at final reconciliation.
 
-All 1,201 requests returned HTTP 202. The configured k6 thresholds passed with no dropped iterations or HTTP failures. Final database reconciliation confirmed 1,201 normalized events and zero pending or failed events.
+**Evidence:** `results/raw-logs/rate10-001.txt`; run-specific PostgreSQL reconciliation.
 
-**Evidence:** `results/raw-logs/rate10-001.txt`; PostgreSQL reconciliation for `rate10-001`.
-
-
-
-## 8. Load Test — 20 req/s
-
-**Run ID:** `rate20-001`  
-**Duration:** 120 seconds  
-**Target rate:** 20 req/s
-
-### k6 Results
-
-| Metric | Observed |
-|---|---:|
-| Total requests | 2,401 |
-| Achieved rate | 20.003 req/s |
-| HTTP 202 checks passed | 1 |
-| Failed HTTP checks | 2,400 |
-| Ingestion success rate | 0.04% |
-| HTTP p95 | 12.06 ms |
-| Dropped iterations | 0 |
-
-### Database Verification
-
-| Metric | Observed |
-|---|---:|
-| Raw events | 2,444 |
-| Normalized events | 2,444 |
-| Pending events | 0 |
-| Failed events | 0 |
-| Normalized rows | 2,444 |
-| Unique normalized events | 2,444 |
-
-**Result:** Database normalization PASS; HTTP acceptance FAIL in the recorded k6 execution. Overall result INCONCLUSIVE because the k6 request count does not reconcile with the run-specific database count.
-
-**Evidence:** k6 console summary and PostgreSQL reconciliation for `rate20-001`.
-
-## 9. Load Test — 20 req/s (Concurrency 4, Batch Size 6)
+## Load Test — 20 req/s
 
 **Run ID:** `rate20-c4-b6-001`  
-**Duration:** 120 seconds  
-**Target rate:** 20 req/s  
-**Worker enabled:** true  
-**Worker concurrency:** 4  
-**Worker batch size:** 6
+**Configuration:** 20 req/s for 120 seconds; worker enabled; **C=4, B=6**.
 
 ### k6 Results
 
 | Metric | Observed |
 |---|---:|
-| Total HTTP requests | 2,400 |
-| HTTP 202 accepted | 2,400 |
+| HTTP requests / HTTP 202 | 2,400 / 2,400 |
 | Achieved throughput | 19.9986 req/s |
 | Ingestion success rate | 100% |
-| HTTP average latency | 24.72 ms |
-| HTTP median latency | 19.54 ms |
-| HTTP p90 latency | 31.83 ms |
-| HTTP p95 latency | 44.36 ms |
-| HTTP maximum latency | 706.84 ms |
+| HTTP average | 24.72 ms |
+| HTTP median | 19.54 ms |
+| HTTP p90 | 31.83 ms |
+| HTTP p95 | 44.36 ms |
+| HTTP maximum | 706.84 ms |
 | Iteration p95 | 45.33 ms |
+| Checks passed | 7,200 / 7,200 |
 | HTTP failures | 0 |
 | Dropped iterations | 0 |
-| Checks passed | 7,200 / 7,200 |
 
-### Database Reconciliation
+### Final Database Reconciliation
 
-| Metric | Final reported result |
+| Metric | Observed |
 |---|---:|
 | Raw events | 2,400 |
 | NORMALIZED events | 2,400 |
-| Failed events | 0 |
-| Pending events | 0 |
 | Normalized rows | 2,400 |
 | Unique normalized events | 2,400 |
+| Pending events | 0 |
+| Failed events | 0 |
 
-Final run-specific SQL reconciliation confirmed 2,400 raw events, 2,400 NORMALIZED events, zero failed events, zero pending events, and exactly 2,400 unique normalized rows.
+**Assessment: PASS.** All accepted events were eventually normalized exactly once. Final backlog was zero; sustained worker throughput at 20 events/sec was not established.
 
-### Processing Observations
+**Evidence:** k6 output for `rate20-c4-b6-001`; final run-specific PostgreSQL reconciliation.
 
-| Observation | Normalized | Pending | Failed |
-|---|---:|---:|---:|
-| 1 | 588 | 1,812 | 0 |
-| 2 | 1,584 | 816 | 0 |
-| 3 | 1,770 | 630 | 0 |
-| Final (reported) | 2,400 | 0 | 0 |
-
-The backlog decreased after ingestion stopped and eventually drained. No failed events or duplicate normalized IDs were observed in the provided snapshots. Exact snapshot times, processing throughput, peak backlog, and drain duration were not captured.
-
-**Result: PASS — HTTP ingestion and final database reconciliation verified.** This run does not establish sustainable normalization throughput at 20 events/sec. Because concurrency and batch size changed together, their individual effects cannot be isolated.
-
-**Evidence:** k6 output for `rate20-c4-b6-001`; intermediate PostgreSQL snapshots and confirmed final SQL reconciliation.
-
-## 10. Load Test — 40 req/s (Concurrency 4, Batch Size 6)
+## Load Test — 40 req/s
 
 **Run ID:** `rate40-c4-b6-002-k6`  
-**Duration:** 120 seconds  
-**Target rate:** 40 req/s  
-**Worker enabled:** true (configured)  
-**Worker concurrency:** 4 (configured)  
-**Worker batch size:** 6 (configured)
+**Configuration:** 40 req/s for 120 seconds; worker enabled; **C=4, B=6**.
 
 ### k6 Results
 
 | Metric | Observed |
 |---|---:|
-| Total HTTP requests | 4,801 |
-| HTTP 202 accepted | 4,801 |
+| HTTP requests / HTTP 202 | 4,801 / 4,801 |
 | Achieved throughput | 40.0006 req/s |
 | Ingestion success rate | 100% |
-| HTTP average latency | 23.72 ms |
-| HTTP median latency | 17.53 ms |
-| HTTP p90 latency | 42.18 ms |
-| HTTP p95 latency | 65.93 ms |
-| HTTP maximum latency | 332.29 ms |
+| HTTP average | 23.72 ms |
+| HTTP median | 17.53 ms |
+| HTTP p90 | 42.18 ms |
+| HTTP p95 | 65.93 ms |
+| HTTP maximum | 332.29 ms |
 | Iteration p95 | 66.41 ms |
+| Checks passed | 14,403 / 14,403 |
 | HTTP failures | 0 |
 | Dropped iterations | 0 |
-| Checks passed | 14,403 / 14,403 |
 
-### Database Reconciliation
+### Final Database Reconciliation
 
-| Metric | Final result |
+| Metric | Observed |
 |---|---:|
 | Raw events | 4,801 |
 | NORMALIZED events | 4,801 |
-| Failed events | 0 |
-| Pending events | 0 |
 | Normalized rows | 4,801 |
 | Unique normalized events | 4,801 |
+| Pending events | 0 |
+| Failed events | 0 |
 
-Final run-specific SQL reconciliation confirmed that all 4,801 accepted events were persisted and normalized, with exactly one normalized row per event. No pending or failed events remained.
+**Assessment: PASS.** All 4,801 requests were accepted and eventually normalized exactly once. The worker accumulated backlog during ingestion, so sustained normalization throughput at 40 events/sec was not demonstrated.
 
-### Processing Observations
-
-| Observation | Raw events | Normalized | Pending | Failed |
-|---|---:|---:|---:|---:|
-| During ingestion | 1,464 | 102 | 1,362 | 0 |
-| After ingestion | 4,801 | 540 | 4,261 | 0 |
-| Drain observation 1 | 4,801 | 636 | 4,165 | 0 |
-| Drain observation 2 | 4,801 | 1,260 | 3,541 | 0 |
-| Final reconciliation | 4,801 | 4,801 | 0 | 0 |
-
-The API maintained the requested 40 req/s ingestion rate without HTTP failures or dropped iterations. Normalization lagged behind ingestion: the largest **observed** pending count was 4,261 events. After the request window ended, the worker continued processing until the backlog reached zero. Snapshot timestamps and total drain duration were not captured, so the peak backlog and sustained normalization throughput cannot be determined from these observations.
-
-**Result: PASS — HTTP ingestion and final database reconciliation verified.** Sustained end-to-end normalization at 40 events/sec was **not demonstrated**. This run used concurrency 4 and batch size 6 together; it does not isolate the effect of either setting.
-
-**Evidence:** k6 console output for `rate40-c4-b6-002-k6` (saved under `results/raw-logs/`); run-specific intermediate SQL snapshots and final PostgreSQL reconciliation.
+**Evidence:** k6 output for `rate40-c4-b6-002-k6` in `results/raw-logs/`; final run-specific PostgreSQL reconciliation.
