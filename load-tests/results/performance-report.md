@@ -19,7 +19,7 @@
 | Smoke — 1 req/s | 1 | 1 | 30s | 31 | 1.031 | 135.21 ms | 0 | 0 | PASS |
 | 5 req/s | 1 | 1 | 120s | 601 | 5.007 | 74.84 ms | 0 | 0 | PASS |
 | 10 req/s | 1 | 1 | 120s | 1,201 | 10.008 | 36.69 ms | 0 | 0 | PASS |
-| 20 req/s | 4 | 6 | 120s | 2,401 | 20.00624 | 40.17 ms | 0 | 0 | HTTP PASS; DB pending |
+| 20 req/s | 4 | 6 | 120s | 2,401 | 20.00624 | 40.17 ms | 0 | 0 | PASS |
 | 40 req/s | 4 | 6 | 120s | 4,801 | 40.0006 | 65.93 ms | 0 | 0 | PASS |
 
 ## Measurement Scope
@@ -157,11 +157,18 @@
 
 ### Final Database Reconciliation
 
-Run-specific PostgreSQL reconciliation for `rate20-c4-b6-004` has not yet been recorded. The previously documented 2,400-row reconciliation belongs to the earlier run and is not evidence for this 2,401-request run.
+| Metric | Observed |
+|---|---:|
+| Raw events | 2,401 |
+| NORMALIZED events | 2,401 |
+| Normalized rows | 2,401 |
+| Unique normalized events | 2,401 |
+| Pending events | 0 |
+| Failed events | 0 |
 
-**Assessment: HTTP PASS; final database reconciliation pending.** All 2,401 ingestion requests passed k6 checks, with zero HTTP failures or dropped iterations. Eventual normalization and one-to-one persistence for this run remain to be confirmed.
+**Assessment: PASS.** All 2,401 ingestion requests passed k6 checks, with zero HTTP failures or dropped iterations. Run-specific PostgreSQL reconciliation confirmed all 2,401 events were eventually normalized exactly once, with no pending or failed events.
 
-**Evidence:** `results/raw_logs/rate20-c4-b6-004-k6.txt`; run-specific PostgreSQL reconciliation pending.
+**Evidence:** `results/raw_logs/rate20-c4-b6-004-k6.txt`; confirmed run-specific PostgreSQL reconciliation.
 
 ## Load Test — 40 req/s
 
