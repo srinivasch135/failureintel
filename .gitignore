@@ -16,6 +16,7 @@ target/
 logs/
 .env
 .env.example
+load-tests/.env.failureintel-loadtest
 
 ### IntelliJ IDEA ###
 .idea
@@ -39,3 +40,12 @@ build/
 # Codex workspace-local Maven cache
 .codex-maven-home/
 .m2-codex/
+
+#AGENTS
+.AGENTS.md
+
+##Load tests readme
+/load-tests/README.md
+
+#Scripts
+/scripts/
