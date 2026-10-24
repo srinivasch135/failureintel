@@ -5,6 +5,7 @@ import com.failureintel.infrastructure.persistence.failureevent.entity.FailureEv
 import com.failureintel.infrastructure.persistence.failureevent.entity.ProcessingStatus;
 import com.failureintel.infrastructure.persistence.failureevent.repository.FailureEventRepository;
 import com.failureintel.infrastructure.persistence.normalizedFailureEvent.repository.NormalizedFailureEventRepository;
+import com.failureintel.infrastructure.persistence.incidentgrouping.repository.GroupingWorkRepository;
 import com.failureintel.test.support.PostgresTestContainer;
 import org.awaitility.Awaitility;
 import org.junit.jupiter.api.Test;
@@ -32,9 +33,21 @@ class FailureEventProcessingWorkerRestartIntegrationTest {
         UUID abandonedClaimId;
         UUID receivedEventId;
         UUID retryableEventId;
+        UUID normalizedEventId;
         try (ConfigurableApplicationContext initialContext = startApplicationContext(false)) {
             FailureEventIngestionService ingestionService = initialContext.getBean(
                     FailureEventIngestionService.class);
+            normalizedEventId = UUID.fromString(ingestionService.ingestFailureEvent(
+                    validRequest("worker-restart-normalized-" + UUID.randomUUID())));
+            ClaimedFailureEvent normalizedClaim = initialContext.getBean(FailureEventClaimService.class)
+                    .claimNextEligibleForProcessing(1).stream()
+                    .filter(candidate -> candidate.eventId().equals(normalizedEventId))
+                    .findFirst().orElseThrow();
+            initialContext.getBean(FailureEventNormalizationProcessor.class).process(normalizedClaim);
+            assertEquals(1, initialContext.getBean(JdbcTemplate.class).queryForObject(
+                    "SELECT COUNT(*) FROM grouping_work WHERE event_id = ? AND status = 'PENDING'",
+                    Integer.class, normalizedEventId));
+
             abandonedClaimId = UUID.fromString(ingestionService.ingestFailureEvent(
                     validRequest("worker-restart-claimed-" + UUID.randomUUID())));
 
@@ -81,6 +94,7 @@ class FailureEventProcessingWorkerRestartIntegrationTest {
                     .findById(receivedEventId)
                     .orElseThrow();
             assertEquals(ProcessingStatus.RECEIVED, persisted.getProcessingStatus());
+
         }
 
         try (ConfigurableApplicationContext restartedContext = startApplicationContext(true)) {
@@ -88,11 +102,16 @@ class FailureEventProcessingWorkerRestartIntegrationTest {
             NormalizedFailureEventRepository normalizedRepository = restartedContext.getBean(
                     NormalizedFailureEventRepository.class);
             JdbcTemplate jdbcTemplate = restartedContext.getBean(JdbcTemplate.class);
+            GroupingWorkRepository groupingWorkRepository = restartedContext.getBean(GroupingWorkRepository.class);
 
             assertTrue(failureEventRepository.existsById(abandonedClaimId),
                     "The raw event should remain stored when the first application context closes");
             assertTrue(failureEventRepository.existsById(receivedEventId),
                     "The received event should remain stored when the first application context closes");
+            assertEquals("PENDING", groupingWorkRepository.findById(normalizedEventId).orElseThrow().getStatus());
+            assertEquals(1, jdbcTemplate.queryForObject(
+                    "SELECT COUNT(*) FROM grouping_work WHERE event_id = ?",
+                    Integer.class, normalizedEventId));
 
             Awaitility.await()
                     .atMost(Duration.ofSeconds(10))
@@ -143,10 +162,13 @@ class FailureEventProcessingWorkerRestartIntegrationTest {
             assertTrue(failureEventRepository.existsById(abandonedClaimId));
             assertTrue(failureEventRepository.existsById(receivedEventId));
             assertTrue(failureEventRepository.existsById(retryableEventId));
+            jdbcTemplate.update(
+                    "DELETE FROM grouping_work WHERE event_id IN (?, ?, ?, ?)",
+                    abandonedClaimId, receivedEventId, retryableEventId, normalizedEventId);
             normalizedRepository.deleteAllById(
-                    java.util.List.of(abandonedClaimId, receivedEventId, retryableEventId));
+                    java.util.List.of(abandonedClaimId, receivedEventId, retryableEventId, normalizedEventId));
             failureEventRepository.deleteAllById(
-                    java.util.List.of(abandonedClaimId, receivedEventId, retryableEventId));
+                    java.util.List.of(abandonedClaimId, receivedEventId, retryableEventId, normalizedEventId));
         }
     }
 

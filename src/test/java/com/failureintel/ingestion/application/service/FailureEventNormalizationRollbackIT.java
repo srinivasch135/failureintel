@@ -6,6 +6,7 @@ import com.failureintel.infrastructure.persistence.failureevent.repository.Failu
 import com.failureintel.ingestion.domain.model.NormalizedFailureEvent;
 import com.failureintel.ingestion.domain.normalization.FailureEventNormalizer;
 import com.failureintel.ingestion.domain.normalization.NormalizationStatus;
+import com.failureintel.infrastructure.persistence.incidentgrouping.repository.GroupingWorkRepository;
 import com.failureintel.infrastructure.persistence.normalizedFailureEvent.entity.NormalizedFailureEventEntity;
 import com.failureintel.infrastructure.persistence.normalizedFailureEvent.repository.NormalizedFailureEventRepository;
 import io.micrometer.core.instrument.MeterRegistry;
@@ -23,6 +24,7 @@ import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.context.TestPropertySource;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
+import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
 import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 
@@ -46,6 +48,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.when;
 
 @SpringBootTest
@@ -87,6 +90,9 @@ class FailureEventNormalizationProcessorRollbackIntegrationTest {
     @Autowired
     private NormalizedFailureEventRepository normalizedFailureEventRepository;
 
+    @MockitoSpyBean
+    private GroupingWorkRepository groupingWorkRepository;
+
     @Autowired
     private JdbcTemplate jdbcTemplate;
 
@@ -98,6 +104,8 @@ class FailureEventNormalizationProcessorRollbackIntegrationTest {
 
     @AfterEach
     void cleanUp() {
+        jdbcTemplate.update("DELETE FROM grouping_work");
+        normalizedFailureEventRepository.deleteAll();
         failureEventRepository.deleteAll();
     }
 
@@ -121,6 +129,34 @@ class FailureEventNormalizationProcessorRollbackIntegrationTest {
                 failureEventRepository.findById(eventId).orElseThrow().getProcessingStatus());
         assertFalse(normalizedFailureEventRepository.existsById(eventId));
         assertEquals(normalizedBefore, counter("normalized"));
+    }
+
+    @Test
+    void shouldRollBackNormalizationWhenGroupingWorkInsertFails() {
+        when(failureEventNormalizer.normalize(any()))
+                .thenReturn(successfulNormalizedEvent("payment-service"));
+        UUID eventId = UUID.fromString(
+                ingestionService.ingestFailureEvent(validRequest("trace-grouping-work-rollback-001")));
+        ClaimedFailureEvent claim = claimService.claimNextEligibleForProcessing(1).get(0);
+        assertEquals(eventId, claim.eventId());
+
+        doAnswer(invocation -> {
+            // Flush the normalized row, then perform the grouping insert on
+            // this transaction's connection before injecting the failure.
+            normalizedFailureEventRepository.flush();
+            jdbcTemplate.update("INSERT INTO grouping_work (event_id) VALUES (?)", eventId);
+            throw new DataIntegrityViolationException("synthetic failure after grouping work insert");
+        }).when(groupingWorkRepository).insertPendingIfAbsent(eventId);
+
+        assertThrows(DataIntegrityViolationException.class, () -> processor.process(claim));
+
+        FailureEventEntity persistedRaw = failureEventRepository.findById(eventId).orElseThrow();
+        assertEquals(ProcessingStatus.PROCESSING, persistedRaw.getProcessingStatus());
+        assertEquals(claim.attemptNumber(), persistedRaw.getAttemptCount(),
+                "The committed claim must survive completion rollback");
+        assertFalse(normalizedFailureEventRepository.existsById(eventId));
+        assertEquals(0, jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM grouping_work WHERE event_id = ?", Integer.class, eventId));
     }
 
     @Test

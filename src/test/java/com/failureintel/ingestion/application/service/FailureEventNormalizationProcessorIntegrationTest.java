@@ -95,6 +95,7 @@ class FailureEventNormalizationProcessorIntegrationTest {
 
     @AfterEach
     void cleanUp() {
+        jdbcTemplate.update("DELETE FROM grouping_work");
         normalizedFailureEventRepository.deleteAll();
         failureEventRepository.deleteAll();
     }
@@ -122,6 +123,9 @@ class FailureEventNormalizationProcessorIntegrationTest {
         assertEquals("prod", normalizedEvent.getNormalizedEnvironment());
         assertEquals("exception", normalizedEvent.getNormalizedEventType());
         assertEquals(1, normalizedFailureEventRepository.count());
+        assertEquals(1, jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM grouping_work WHERE event_id = ? AND status = 'PENDING'",
+                Integer.class, eventId));
         assertEquals(normalizedBefore + 1, counter("normalized"));
     }
 
@@ -162,7 +166,14 @@ class FailureEventNormalizationProcessorIntegrationTest {
 
         assertEquals(ProcessingStatus.NORMALIZED,
                 failureEventRepository.findById(eventId).orElseThrow().getProcessingStatus());
+        NormalizedFailureEventEntity normalizedEvent = normalizedFailureEventRepository
+                .findById(eventId).orElseThrow();
+        assertEquals(eventId, normalizedEvent.getEventId());
+        assertEquals("payment-service", normalizedEvent.getNormalizedServiceName());
         assertEquals(1, normalizedFailureEventRepository.count());
+        assertEquals(1, jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM grouping_work WHERE event_id = ?",
+                Integer.class, eventId));
     }
 
     @Test

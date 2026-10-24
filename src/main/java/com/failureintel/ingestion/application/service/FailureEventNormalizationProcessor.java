@@ -14,6 +14,7 @@ import com.failureintel.infrastructure.persistence.failureevent.entity.Processin
 import com.failureintel.infrastructure.persistence.failureevent.mapper.FailureEventEntityMapper;
 import com.failureintel.infrastructure.persistence.failureevent.mapper.FailureEventEntityMapper.MalformedRawPayloadException;
 import com.failureintel.infrastructure.persistence.failureevent.repository.FailureEventRepository;
+import com.failureintel.infrastructure.persistence.incidentgrouping.repository.GroupingWorkRepository;
 import com.failureintel.infrastructure.persistence.normalizedFailureEvent.entity.NormalizedFailureEventEntity;
 import com.failureintel.infrastructure.persistence.normalizedFailureEvent.mapper.NormalizedFailureEventEntityMapper;
 import com.failureintel.infrastructure.persistence.normalizedFailureEvent.repository.NormalizedFailureEventRepository;
@@ -38,6 +39,7 @@ public class FailureEventNormalizationProcessor {
 
     private final FailureEventRepository failureEventRepository;
     private final NormalizedFailureEventRepository normalizedFailureEventRepository;
+    private final GroupingWorkRepository groupingWorkRepository;
     private final FailureEventParser failureEventParser;
     private final FailureEventNormalizer failureEventNormalizer;
     private final FailureEventMetrics failureEventMetrics;
@@ -45,11 +47,13 @@ public class FailureEventNormalizationProcessor {
     public FailureEventNormalizationProcessor(
             FailureEventRepository failureEventRepository,
             NormalizedFailureEventRepository normalizedFailureEventRepository,
+            GroupingWorkRepository groupingWorkRepository,
             FailureEventParser failureEventParser,
             FailureEventNormalizer failureEventNormalizer,
             FailureEventMetrics failureEventMetrics) {
         this.failureEventRepository = failureEventRepository;
         this.normalizedFailureEventRepository = normalizedFailureEventRepository;
+        this.groupingWorkRepository = groupingWorkRepository;
         this.failureEventParser = failureEventParser;
         this.failureEventNormalizer = failureEventNormalizer;
         this.failureEventMetrics = failureEventMetrics;
@@ -123,6 +127,8 @@ public class FailureEventNormalizationProcessor {
 
         normalizedEntity.setFailureReason(null);
         normalizedFailureEventRepository.save(normalizedEntity);
+
+        groupingWorkRepository.insertPendingIfAbsent(failureEvent.getEventId());
 
         failureEvent.markNormalized();
 
