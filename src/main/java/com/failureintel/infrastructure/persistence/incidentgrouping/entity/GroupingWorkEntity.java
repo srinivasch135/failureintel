@@ -74,4 +74,17 @@ public class GroupingWorkEntity {
     public String getFailureReason() { return failureReason; }
     public String getTerminalOutcome() { return terminalOutcome; }
     public String getUnassignedReason() { return unassignedReason; }
+
+    public void claimForProcessing(LocalDateTime claimedAt) {
+        if (!"PENDING".equals(status) && !"RETRYABLE".equals(status)) {
+            throw new IllegalStateException("Only eligible grouping work can be claimed");
+        }
+        status = "PROCESSING";
+        attemptCount++;
+        lastAttemptAt = claimedAt;
+        processingStartedAt = claimedAt;
+        nextAttemptAt = null;
+        failureCode = null;
+        failureReason = null;
+    }
 }
