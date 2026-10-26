@@ -87,4 +87,28 @@ public class GroupingWorkEntity {
         failureCode = null;
         failureReason = null;
     }
+
+    public void completeAssociated() {
+        complete("ASSOCIATED", null);
+    }
+
+    public void completeUnassigned(String reason) {
+        if (reason == null || reason.isBlank()) {
+            throw new IllegalArgumentException("unassigned reason must not be blank");
+        }
+        complete("UNASSIGNED", reason);
+    }
+
+    private void complete(String outcome, String reason) {
+        if (!"PROCESSING".equals(status)) {
+            throw new IllegalStateException("Only processing grouping work can be completed");
+        }
+        status = "COMPLETED";
+        processingStartedAt = null;
+        nextAttemptAt = null;
+        terminalOutcome = outcome;
+        unassignedReason = reason;
+        failureCode = null;
+        failureReason = null;
+    }
 }

@@ -19,6 +19,7 @@ import java.sql.PreparedStatement;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.function.Consumer;
 
@@ -57,27 +58,30 @@ public class GroupingCoordinationService {
         NormalizedFailureEventEntity entity = normalizedEventRepository.findById(claim.eventId())
                 .orElseThrow(() -> new IllegalStateException("Claimed grouping event has no normalized event"));
         NormalizedFailureEvent event = toDomain(entity);
-        CanonicalGroupingSignature signature = CanonicalGroupingSignature.from(event)
-                .orElseThrow(() -> new IllegalStateException("Claimed grouping event has no canonical signature"));
+        Optional<CanonicalGroupingSignature> signature = CanonicalGroupingSignature.from(event);
+        List<IncidentEntity> matchingCandidates = List.of();
+        if (signature.isPresent()) {
+            CanonicalGroupingSignature canonicalSignature = signature.orElseThrow();
+            jdbcTemplate.execute((ConnectionCallback<Void>) connection -> {
+                try (PreparedStatement statement = connection.prepareStatement("SELECT pg_advisory_xact_lock(?)")) {
+                    statement.setLong(1, canonicalSignature.advisoryLockKey());
+                    statement.execute();
+                }
+                return null;
+            });
 
-        jdbcTemplate.execute((ConnectionCallback<Void>) connection -> {
-            try (PreparedStatement statement = connection.prepareStatement("SELECT pg_advisory_xact_lock(?)")) {
-                statement.setLong(1, signature.advisoryLockKey());
-                statement.execute();
-            }
-            return null;
-        });
-
+            List<IncidentEntity> candidates = incidentRepository.findHistoryBySignature(
+                    canonicalSignature.serviceName(), canonicalSignature.environment(),
+                    canonicalSignature.errorType(), canonicalSignature.dependencyTarget().orElse(null));
+            matchingCandidates = candidates.stream()
+                    .filter(candidate -> canonicalSignature.serviceName().equals(candidate.getServiceName())
+                            && canonicalSignature.environment().equals(candidate.getEnvironment())
+                            && canonicalSignature.errorType().equals(candidate.getErrorType())
+                            && Objects.equals(canonicalSignature.dependencyTarget().orElse(null),
+                                    candidate.getDependencyTarget()))
+                    .toList();
+        }
         boolean alreadyAssociated = membershipRepository.existsById(claim.eventId());
-        List<IncidentEntity> candidates = incidentRepository.findHistoryBySignature(
-                signature.serviceName(), signature.environment(), signature.errorType(),
-                signature.dependencyTarget().orElse(null));
-        List<IncidentEntity> matchingCandidates = candidates.stream()
-                .filter(candidate -> signature.serviceName().equals(candidate.getServiceName())
-                        && signature.environment().equals(candidate.getEnvironment())
-                        && signature.errorType().equals(candidate.getErrorType())
-                        && Objects.equals(signature.dependencyTarget().orElse(null), candidate.getDependencyTarget()))
-                .toList();
 
         operation.accept(new CoordinationSnapshot(event, signature, alreadyAssociated, matchingCandidates));
         return true;
@@ -94,10 +98,11 @@ public class GroupingCoordinationService {
 
     public record CoordinationSnapshot(
             NormalizedFailureEvent event,
-            CanonicalGroupingSignature signature,
+            Optional<CanonicalGroupingSignature> signature,
             boolean alreadyAssociated,
             List<IncidentEntity> candidates) {
         public CoordinationSnapshot {
+            signature = Objects.requireNonNull(signature, "signature must not be null");
             candidates = List.copyOf(candidates);
         }
     }

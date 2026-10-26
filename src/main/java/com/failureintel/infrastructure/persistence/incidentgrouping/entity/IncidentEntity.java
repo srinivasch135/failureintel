@@ -74,4 +74,18 @@ public class IncidentEntity {
     public LocalDateTime getInactivityExpiresAt() { return inactivityExpiresAt; }
     public LocalDateTime getClosedAt() { return closedAt; }
     public long getAssociatedEventCount() { return associatedEventCount; }
+
+    public void associateOccurrence(LocalDateTime occurredAt, LocalDateTime inactivityExpiresAt) {
+        if (!"ACTIVE".equals(status)) {
+            throw new IllegalStateException("Only ACTIVE incidents can accept a new occurrence");
+        }
+        if (occurredAt.isBefore(firstOccurredAt)) {
+            firstOccurredAt = occurredAt;
+        }
+        if (occurredAt.isAfter(lastOccurredAt)) {
+            lastOccurredAt = occurredAt;
+        }
+        this.inactivityExpiresAt = inactivityExpiresAt;
+        associatedEventCount++;
+    }
 }
