@@ -22,6 +22,7 @@ import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import java.time.LocalDateTime;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
@@ -30,6 +31,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -200,6 +202,94 @@ class IncidentGroupingPersistenceIntegrationTest {
             releaseFirst.countDown();
             executor.shutdownNow();
         }
+    }
+
+    @Test
+    void readsExactCandidateNoWrite() {
+        UUID eventId = newClaimedEvent("ExampleError");
+        LocalDateTime first = LocalDateTime.now().minusHours(3).truncatedTo(ChronoUnit.MICROS);
+        LocalDateTime last = first.plusMinutes(5);
+        LocalDateTime closedAt = last.plusMinutes(2);
+        UUID activeId = UUID.randomUUID();
+        UUID closedId = UUID.randomUUID();
+        UUID otherDependencyId = UUID.randomUUID();
+        UUID otherErrorId = UUID.randomUUID();
+        UUID otherServiceId = UUID.randomUUID();
+        UUID otherEnvironmentId = UUID.randomUUID();
+        incidentIds.addAll(List.of(activeId, closedId, otherDependencyId, otherErrorId,
+                otherServiceId, otherEnvironmentId));
+        incidentRepository.saveAndFlush(new IncidentEntity(activeId, "grouping-test", "test", "ExampleError",
+                null, "ACTIVE", first, last, last.plusMinutes(30), null, 4));
+        incidentRepository.saveAndFlush(new IncidentEntity(closedId, "grouping-test", "test", "ExampleError",
+                null, "CLOSED", first.minusHours(2), last.minusHours(2), last.plusMinutes(30), closedAt, 7));
+        incidentRepository.saveAndFlush(new IncidentEntity(otherDependencyId, "grouping-test", "test",
+                "ExampleError", "database", "ACTIVE", first, last, last.plusMinutes(30), null, 1));
+        incidentRepository.saveAndFlush(new IncidentEntity(otherErrorId, "grouping-test", "test", "OtherError",
+                null, "ACTIVE", first, last, last.plusMinutes(30), null, 1));
+        incidentRepository.saveAndFlush(new IncidentEntity(otherServiceId, "another-service", "test", "ExampleError",
+                null, "ACTIVE", first, last, last.plusMinutes(30), null, 1));
+        incidentRepository.saveAndFlush(new IncidentEntity(otherEnvironmentId, "grouping-test", "production",
+                "ExampleError", null, "ACTIVE", first, last, last.plusMinutes(30), null, 1));
+
+        long membershipsBefore = jdbcTemplate.queryForObject("SELECT count(*) FROM incident_membership", Long.class);
+        AtomicReference<GroupingCoordinationService.CoordinationSnapshot> observed = new AtomicReference<>();
+        assertTrue(coordinationService.withCoordination(claimFor(eventId), observed::set));
+
+        var snapshot = observed.get();
+        assertEquals(List.of(activeId, closedId), snapshot.candidates().stream()
+                .map(IncidentEntity::getIncidentId).toList());
+        IncidentEntity active = snapshot.candidates().get(0);
+        assertEquals("ACTIVE", active.getStatus());
+        assertEquals(first, active.getFirstOccurredAt());
+        assertEquals(last, active.getLastOccurredAt());
+        IncidentEntity closed = snapshot.candidates().get(1);
+        assertEquals("CLOSED", closed.getStatus());
+        assertEquals(first.minusHours(2), closed.getFirstOccurredAt());
+        assertEquals(last.minusHours(2), closed.getLastOccurredAt());
+        assertEquals(closedAt, closed.getClosedAt());
+        assertEquals("PROCESSING", groupingWorkRepository.findById(eventId).orElseThrow().getStatus());
+        assertEquals(membershipsBefore, jdbcTemplate.queryForObject(
+                "SELECT count(*) FROM incident_membership", Long.class));
+        assertEquals(6L, jdbcTemplate.queryForObject("SELECT count(*) FROM incident WHERE service_name IN "
+                + "('grouping-test', 'another-service')",
+                Long.class));
+    }
+
+    @Test
+    void checksExpiryAndCorrection() {
+        UUID expiryEvent = newClaimedEvent("ExampleError");
+        UUID activeId = newIncident("ACTIVE", null);
+        IncidentEntity active = incidentRepository.findById(activeId).orElseThrow();
+        LocalDateTime exactExpiry = active.getLastOccurredAt().plusMinutes(30);
+        jdbcTemplate.update("UPDATE normalized_failure_event SET normalized_occurred_at = ? WHERE event_id = ?",
+                exactExpiry, expiryEvent);
+
+        completeClaim(expiryEvent);
+
+        UUID newIncidentId = membershipRepository.findById(expiryEvent).orElseThrow().getIncidentId();
+        assertFalse(newIncidentId.equals(activeId));
+        assertEquals("ACTIVE", incidentRepository.findById(activeId).orElseThrow().getStatus());
+
+        UUID correctionEvent = newClaimedEvent("ExampleError");
+        LocalDateTime closedAt = LocalDateTime.now().minusHours(25).truncatedTo(ChronoUnit.MICROS);
+        UUID closedId = newIncident("CLOSED", closedAt);
+        IncidentEntity closed = incidentRepository.findById(closedId).orElseThrow();
+        LocalDateTime historicalLast = closedAt.minusHours(1);
+        LocalDateTime historicalFirst = historicalLast.minusMinutes(1);
+        jdbcTemplate.update("UPDATE incident SET first_occurred_at = ?, last_occurred_at = ?, "
+                        + "inactivity_expires_at = ? WHERE incident_id = ?",
+                historicalFirst, historicalLast, historicalLast.plusMinutes(30), closedId);
+        jdbcTemplate.update("UPDATE normalized_failure_event SET normalized_occurred_at = ? WHERE event_id = ?",
+                historicalLast, correctionEvent);
+
+        completeClaim(correctionEvent);
+
+        assertUnassignedWork(correctionEvent, "HISTORICAL_CORRECTION_EXPIRED");
+        IncidentEntity closedAfter = incidentRepository.findById(closedId).orElseThrow();
+        assertEquals("CLOSED", closedAfter.getStatus());
+        assertEquals(historicalFirst, closedAfter.getFirstOccurredAt());
+        assertEquals(historicalLast, closedAfter.getLastOccurredAt());
+        assertEquals(closed.getClosedAt(), closedAfter.getClosedAt());
     }
 
     @Test
