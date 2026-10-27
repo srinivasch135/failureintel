@@ -88,4 +88,12 @@ public class IncidentEntity {
         this.inactivityExpiresAt = inactivityExpiresAt;
         associatedEventCount++;
     }
+
+    public void close(LocalDateTime closedAt) {
+        if (!"ACTIVE".equals(status)) {
+            throw new IllegalStateException("Only ACTIVE incidents can be closed");
+        }
+        this.status = "CLOSED";
+        this.closedAt = closedAt;
+    }
 }

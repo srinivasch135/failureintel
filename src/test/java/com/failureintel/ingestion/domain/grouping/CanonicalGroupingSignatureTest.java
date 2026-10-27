@@ -25,6 +25,16 @@ class CanonicalGroupingSignatureTest {
     }
 
     @Test
+    void fieldsMatchEventIdentity() {
+        CanonicalGroupingSignature eventSignature = signature(" service ", "prod", "Failure", " database ");
+        CanonicalGroupingSignature incidentSignature = CanonicalGroupingSignature.fromFields(
+                "service", "prod", "Failure", "database").orElseThrow();
+
+        assertEquals(eventSignature, incidentSignature);
+        assertEquals(eventSignature.advisoryLockKey(), incidentSignature.advisoryLockKey());
+    }
+
+    @Test
     void shouldTreatNullAndBlankDependencyTargetsAsNoDependency() {
         assertEquals(signature("service", "prod", "Failure", null),
                 signature("service", "prod", "Failure", "  "));

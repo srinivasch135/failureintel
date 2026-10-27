@@ -9,12 +9,14 @@ import com.failureintel.infrastructure.persistence.incidentgrouping.repository.I
 import com.failureintel.ingestion.application.service.ClaimedGroupingWork;
 import com.failureintel.ingestion.application.service.GroupingCoordinationService;
 import com.failureintel.ingestion.application.service.GroupingWorkCompletionProcessor;
+import com.failureintel.ingestion.application.service.IncidentClosureProcessor;
 import com.failureintel.test.support.PostgresTestContainer;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
@@ -51,6 +53,7 @@ class IncidentGroupingPersistenceIntegrationTest {
     @Autowired private IncidentMembershipRepository membershipRepository;
     @Autowired private GroupingCoordinationService coordinationService;
     @Autowired private GroupingWorkCompletionProcessor completionProcessor;
+    @Autowired private IncidentClosureProcessor closureProcessor;
     @Autowired private PlatformTransactionManager transactionManager;
 
     private final List<UUID> eventIds = new ArrayList<>();
@@ -131,6 +134,166 @@ class IncidentGroupingPersistenceIntegrationTest {
                 anotherEvent, "PENDING", 0, now, null, null, null, null, null, null, null));
         assertThrows(RuntimeException.class, () -> membershipRepository.saveAndFlush(
                 new IncidentMembershipEntity(anotherEvent, UUID.randomUUID())));
+    }
+
+    @Test
+    void closesExpiredIncident() {
+        UUID incidentId = newIncident("ACTIVE", null);
+        jdbcTemplate.update("UPDATE incident SET inactivity_expires_at = LOCALTIMESTAMP - INTERVAL '1 second' "
+                + "WHERE incident_id = ?", incidentId);
+
+        assertTrue(closureProcessor.closeIfExpired(incidentId));
+
+        IncidentEntity closed = incidentRepository.findById(incidentId).orElseThrow();
+        assertEquals("CLOSED", closed.getStatus());
+        assertTrue(closed.getClosedAt() != null);
+    }
+
+    @Test
+    void keepsUnexpiredIncident() {
+        UUID incidentId = newIncident("ACTIVE", null);
+        IncidentEntity before = incidentRepository.findById(incidentId).orElseThrow();
+
+        assertFalse(closureProcessor.closeIfExpired(incidentId));
+
+        IncidentEntity after = incidentRepository.findById(incidentId).orElseThrow();
+        assertEquals("ACTIVE", after.getStatus());
+        assertEquals(before.getClosedAt(), after.getClosedAt());
+        assertEquals(before.getInactivityExpiresAt(), after.getInactivityExpiresAt());
+    }
+
+    @Test
+    void closesAtExpiryBoundary() {
+        UUID incidentId = newIncident("ACTIVE", null);
+        jdbcTemplate.update("UPDATE incident SET inactivity_expires_at = LOCALTIMESTAMP WHERE incident_id = ?",
+                incidentId);
+        LocalDateTime expiry = jdbcTemplate.queryForObject(
+                "SELECT inactivity_expires_at FROM incident WHERE incident_id = ?", LocalDateTime.class, incidentId);
+        assertTrue(incidentRepository.findExpiredActive(expiry, PageRequest.of(0, 100)).stream()
+                .anyMatch(candidate -> incidentId.equals(candidate.getIncidentId())));
+
+        assertTrue(closureProcessor.closeIfExpired(incidentId));
+        assertEquals("CLOSED", incidentRepository.findById(incidentId).orElseThrow().getStatus());
+    }
+
+    @Test
+    void keepsClosedUnchanged() {
+        LocalDateTime closedAt = LocalDateTime.now().minusMinutes(2).truncatedTo(ChronoUnit.MICROS);
+        UUID incidentId = newIncident("CLOSED", closedAt);
+        jdbcTemplate.update("UPDATE incident SET inactivity_expires_at = LOCALTIMESTAMP - INTERVAL '1 hour' "
+                + "WHERE incident_id = ?", incidentId);
+
+        assertFalse(closureProcessor.closeIfExpired(incidentId));
+        assertEquals(closedAt, incidentRepository.findById(incidentId).orElseThrow().getClosedAt());
+    }
+
+    @Test
+    void rechecksGroupingExtension() throws Exception {
+        UUID incidentId = newIncident("ACTIVE", null);
+        jdbcTemplate.update("UPDATE incident SET inactivity_expires_at = LOCALTIMESTAMP - INTERVAL '1 second' "
+                + "WHERE incident_id = ?", incidentId);
+        UUID eventId = newClaimedNormalizedEvent("grouping-test", "ExampleError", 1);
+        CountDownLatch groupingLocked = new CountDownLatch(1);
+        CountDownLatch allowGroupingCommit = new CountDownLatch(1);
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try {
+            var grouping = executor.submit(() -> coordinationService.withCoordination(claimFor(eventId), snapshot -> {
+                groupingLocked.countDown();
+                await(allowGroupingCommit);
+                IncidentEntity incident = incidentRepository.findById(incidentId).orElseThrow();
+                incident.associateOccurrence(LocalDateTime.now(), LocalDateTime.now().plusMinutes(30));
+            }));
+            assertTrue(groupingLocked.await(5, TimeUnit.SECONDS));
+            var closure = executor.submit(() -> closureProcessor.closeIfExpired(incidentId));
+            awaitAdvisoryWait();
+            allowGroupingCommit.countDown();
+            assertTrue(grouping.get(5, TimeUnit.SECONDS));
+            assertFalse(closure.get(5, TimeUnit.SECONDS));
+        } finally {
+            allowGroupingCommit.countDown();
+            executor.shutdownNow();
+        }
+        assertEquals("ACTIVE", incidentRepository.findById(incidentId).orElseThrow().getStatus());
+    }
+
+    @Test
+    void groupingObservesCommittedClosure() {
+        UUID incidentId = newIncident("ACTIVE", null);
+        jdbcTemplate.update("UPDATE incident SET inactivity_expires_at = LOCALTIMESTAMP - INTERVAL '1 second' "
+                + "WHERE incident_id = ?", incidentId);
+        assertTrue(closureProcessor.closeIfExpired(incidentId));
+        UUID eventId = newClaimedEvent("ExampleError");
+        IncidentEntity closed = incidentRepository.findById(incidentId).orElseThrow();
+        jdbcTemplate.update("UPDATE normalized_failure_event SET normalized_occurred_at = ? WHERE event_id = ?",
+                closed.getLastOccurredAt(), eventId);
+
+        completeClaim(eventId);
+
+        assertEquals("CLOSED", incidentRepository.findById(incidentId).orElseThrow().getStatus());
+        assertEquals(incidentId, membershipRepository.findById(eventId).orElseThrow().getIncidentId());
+    }
+
+    @Test
+    void closesOnlyOnceConcurrently() throws Exception {
+        UUID incidentId = newIncident("ACTIVE", null);
+        jdbcTemplate.update("UPDATE incident SET inactivity_expires_at = LOCALTIMESTAMP - INTERVAL '1 second' "
+                + "WHERE incident_id = ?", incidentId);
+        CountDownLatch start = new CountDownLatch(1);
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try {
+            var first = executor.submit(() -> { await(start); return closureProcessor.closeIfExpired(incidentId); });
+            var second = executor.submit(() -> { await(start); return closureProcessor.closeIfExpired(incidentId); });
+            start.countDown();
+            assertEquals(1, (first.get(5, TimeUnit.SECONDS) ? 1 : 0)
+                    + (second.get(5, TimeUnit.SECONDS) ? 1 : 0));
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    void rollsBackFailedClosure() {
+        UUID incidentId = newIncident("ACTIVE", null);
+        jdbcTemplate.update("UPDATE incident SET inactivity_expires_at = LOCALTIMESTAMP - INTERVAL '1 second' "
+                + "WHERE incident_id = ?", incidentId);
+        jdbcTemplate.execute("CREATE FUNCTION fail_incident_close() RETURNS trigger LANGUAGE plpgsql "
+                + "AS $$ BEGIN RAISE EXCEPTION 'injected closure failure'; END $$");
+        jdbcTemplate.execute("CREATE TRIGGER trg_fail_incident_close BEFORE UPDATE OF status ON incident "
+                + "FOR EACH ROW WHEN (NEW.status = 'CLOSED') EXECUTE FUNCTION fail_incident_close()");
+        try {
+            assertThrows(RuntimeException.class, () -> closureProcessor.closeIfExpired(incidentId));
+        } finally {
+            jdbcTemplate.execute("DROP TRIGGER IF EXISTS trg_fail_incident_close ON incident");
+            jdbcTemplate.execute("DROP FUNCTION IF EXISTS fail_incident_close()");
+        }
+        IncidentEntity unchanged = incidentRepository.findById(incidentId).orElseThrow();
+        assertEquals("ACTIVE", unchanged.getStatus());
+        assertEquals(null, unchanged.getClosedAt());
+    }
+
+    @Test
+    void preservesClosedMembership() {
+        UUID incidentId = newIncident("ACTIVE", null);
+        UUID eventId = newClaimedEvent("ExampleError");
+        jdbcTemplate.update("UPDATE normalized_failure_event SET normalized_occurred_at = ? WHERE event_id = ?",
+                incidentRepository.findById(incidentId).orElseThrow().getLastOccurredAt(), eventId);
+        completeClaim(eventId);
+        IncidentEntity before = incidentRepository.findById(incidentId).orElseThrow();
+        jdbcTemplate.update("UPDATE incident SET inactivity_expires_at = LOCALTIMESTAMP - INTERVAL '1 second' "
+                + "WHERE incident_id = ?", incidentId);
+
+        assertTrue(closureProcessor.closeIfExpired(incidentId));
+
+        IncidentEntity after = incidentRepository.findById(incidentId).orElseThrow();
+        assertEquals(before.getIncidentId(), after.getIncidentId());
+        assertEquals(before.getServiceName(), after.getServiceName());
+        assertEquals(before.getEnvironment(), after.getEnvironment());
+        assertEquals(before.getErrorType(), after.getErrorType());
+        assertEquals(before.getDependencyTarget(), after.getDependencyTarget());
+        assertEquals(before.getFirstOccurredAt(), after.getFirstOccurredAt());
+        assertEquals(before.getLastOccurredAt(), after.getLastOccurredAt());
+        assertEquals(before.getAssociatedEventCount(), after.getAssociatedEventCount());
+        assertEquals(incidentId, membershipRepository.findById(eventId).orElseThrow().getIncidentId());
     }
 
     @Test
@@ -709,6 +872,19 @@ class IncidentGroupingPersistenceIntegrationTest {
             Thread.currentThread().interrupt();
             throw new IllegalStateException("Interrupted while waiting for test coordination", exception);
         }
+    }
+
+    private void awaitAdvisoryWait() throws InterruptedException {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (System.nanoTime() < deadline) {
+            Long waiting = jdbcTemplate.queryForObject("SELECT count(*) FROM pg_stat_activity "
+                    + "WHERE wait_event_type = 'Lock' AND query LIKE '%pg_advisory_xact_lock%'", Long.class);
+            if (waiting != null && waiting > 0) {
+                return;
+            }
+            Thread.sleep(10);
+        }
+        throw new AssertionError("Closure did not wait for the grouping advisory lock");
     }
 
     private UUID newIncident(String status, LocalDateTime closedAt) {

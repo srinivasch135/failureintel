@@ -54,9 +54,16 @@ public final class CanonicalGroupingSignature {
             return Optional.empty();
         }
 
-        String serviceName = trimToNull(event.getServiceName());
-        String environment = trimToNull(event.getEnvironment());
-        String errorType = trimToNull(event.getErrorType());
+        return fromFields(event.getServiceName(), event.getEnvironment(), event.getErrorType(),
+                event.getDependencyTarget());
+    }
+
+    /** Builds the same canonical signature from persisted incident identity fields. */
+    public static Optional<CanonicalGroupingSignature> fromFields(
+            String serviceName, String environment, String errorType, String dependencyTarget) {
+        serviceName = trimToNull(serviceName);
+        environment = trimToNull(environment);
+        errorType = trimToNull(errorType);
         if (serviceName == null || environment == null || errorType == null) {
             return Optional.empty();
         }
@@ -65,7 +72,7 @@ public final class CanonicalGroupingSignature {
                 serviceName,
                 environment,
                 errorType,
-                trimToNull(event.getDependencyTarget())));
+                trimToNull(dependencyTarget)));
     }
 
     public String serviceName() {
