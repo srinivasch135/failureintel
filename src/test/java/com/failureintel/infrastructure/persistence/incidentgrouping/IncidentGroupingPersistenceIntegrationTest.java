@@ -293,6 +293,113 @@ class IncidentGroupingPersistenceIntegrationTest {
     }
 
     @Test
+    void appliesOccurrenceRules() {
+        UUID incidentId = newTimedIncident("ACTIVE", LocalDateTime.of(2026, 1, 1, 12, 0), null);
+        UUID forwardEvent = newClaimedEvent("ExampleError");
+        LocalDateTime first = LocalDateTime.of(2026, 1, 1, 12, 0);
+        jdbcTemplate.update("UPDATE normalized_failure_event SET normalized_occurred_at = ? WHERE event_id = ?",
+                first.plusMinutes(20), forwardEvent);
+
+        completeClaim(forwardEvent);
+
+        IncidentEntity extended = incidentRepository.findById(incidentId).orElseThrow();
+        assertEquals(first, extended.getFirstOccurredAt());
+        assertEquals(first.plusMinutes(20), extended.getLastOccurredAt());
+
+        UUID backwardEvent = newClaimedEvent("ExampleError");
+        jdbcTemplate.update("UPDATE normalized_failure_event SET normalized_occurred_at = ? WHERE event_id = ?",
+                first.minusMinutes(30), backwardEvent);
+
+        completeClaim(backwardEvent);
+
+        IncidentEntity extendedBothWays = incidentRepository.findById(incidentId).orElseThrow();
+        assertEquals(first.minusMinutes(30), extendedBothWays.getFirstOccurredAt());
+        assertEquals(first.plusMinutes(20), extendedBothWays.getLastOccurredAt());
+        assertEquals(incidentId, membershipRepository.findById(backwardEvent).orElseThrow().getIncidentId());
+    }
+
+    @Test
+    void selectsByOccurrenceTime() {
+        LocalDateTime first = LocalDateTime.of(2026, 1, 1, 12, 0);
+        UUID incidentId = newTimedIncident("ACTIVE", first, null);
+        jdbcTemplate.update("UPDATE incident SET last_occurred_at = ?, inactivity_expires_at = ? WHERE incident_id = ?",
+                first.plusMinutes(20), first.plusMinutes(50), incidentId);
+        UUID eventId = newClaimedEvent("ExampleError");
+        jdbcTemplate.update("UPDATE normalized_failure_event SET normalized_occurred_at = ?, normalized_at = ? "
+                        + "WHERE event_id = ?",
+                first.plusMinutes(10), LocalDateTime.of(2026, 10, 26, 12, 0), eventId);
+
+        completeClaim(eventId);
+
+        assertEquals(incidentId, membershipRepository.findById(eventId).orElseThrow().getIncidentId());
+        assertEquals(first, incidentRepository.findById(incidentId).orElseThrow().getFirstOccurredAt());
+        assertEquals(first.plusMinutes(20), incidentRepository.findById(incidentId).orElseThrow().getLastOccurredAt());
+    }
+
+    @Test
+    void rejectsOverlappingHistory() {
+        LocalDateTime first = LocalDateTime.of(2026, 1, 1, 12, 0);
+        UUID activeId = newTimedIncident("ACTIVE", first, null);
+        jdbcTemplate.update("UPDATE incident SET last_occurred_at = ?, inactivity_expires_at = ? WHERE incident_id = ?",
+                first.plusMinutes(1), first.plusMinutes(31), activeId);
+        UUID closedId = UUID.randomUUID();
+        incidentIds.add(closedId);
+        incidentRepository.saveAndFlush(new IncidentEntity(closedId, "grouping-test", "test", "ExampleError",
+                null, "CLOSED", first.minusMinutes(5), first.plusMinutes(5), first.plusMinutes(35),
+                first.plusDays(1), 1));
+        UUID eventId = newClaimedEvent("ExampleError");
+        jdbcTemplate.update("UPDATE normalized_failure_event SET normalized_occurred_at = ? WHERE event_id = ?",
+                first.minusMinutes(10), eventId);
+
+        completeClaim(eventId);
+
+        assertUnassignedWork(eventId, "TEMPORAL_OVERLAP_CONFLICT");
+        assertEquals(first, incidentRepository.findById(activeId).orElseThrow().getFirstOccurredAt());
+        assertEquals(first.plusMinutes(1), incidentRepository.findById(activeId).orElseThrow().getLastOccurredAt());
+        assertEquals("CLOSED", incidentRepository.findById(closedId).orElseThrow().getStatus());
+    }
+
+    @Test
+    void rejectsAmbiguousHistory() {
+        LocalDateTime first = LocalDateTime.of(2026, 1, 1, 12, 0);
+        UUID earlier = newTimedIncident("ACTIVE", first, null);
+        UUID later = UUID.randomUUID();
+        incidentIds.add(later);
+        incidentRepository.saveAndFlush(new IncidentEntity(later, "grouping-test", "test", "ExampleError",
+                null, "ACTIVE", first.plusMinutes(10), first.plusMinutes(11), first.plusMinutes(41), null, 1));
+        UUID eventId = newClaimedEvent("ExampleError");
+        jdbcTemplate.update("UPDATE normalized_failure_event SET normalized_occurred_at = ? WHERE event_id = ?",
+                first.plusMinutes(5), eventId);
+
+        completeClaim(eventId);
+
+        assertUnassignedWork(eventId, "AMBIGUOUS_INCIDENT_MATCH");
+        assertEquals(1, incidentRepository.findById(earlier).orElseThrow().getAssociatedEventCount());
+        assertEquals(1, incidentRepository.findById(later).orElseThrow().getAssociatedEventCount());
+    }
+
+    @Test
+    void rejectsExpiredClosedHistory() {
+        LocalDateTime closedAt = LocalDateTime.of(2026, 1, 1, 12, 0);
+        LocalDateTime first = closedAt.minusHours(2);
+        UUID closedId = newTimedIncident("CLOSED", first, closedAt);
+        jdbcTemplate.update("UPDATE incident SET last_occurred_at = ?, inactivity_expires_at = ? WHERE incident_id = ?",
+                first.plusMinutes(1), first.plusMinutes(31), closedId);
+        UUID eventId = newClaimedEvent("ExampleError");
+        jdbcTemplate.update("UPDATE normalized_failure_event SET normalized_occurred_at = ? WHERE event_id = ?",
+                first.plusSeconds(30), eventId);
+
+        completeClaim(eventId);
+
+        assertUnassignedWork(eventId, "HISTORICAL_CORRECTION_EXPIRED");
+        IncidentEntity closed = incidentRepository.findById(closedId).orElseThrow();
+        assertEquals("CLOSED", closed.getStatus());
+        assertEquals(first, closed.getFirstOccurredAt());
+        assertEquals(first.plusMinutes(1), closed.getLastOccurredAt());
+        assertEquals(closedAt, closed.getClosedAt());
+    }
+
+    @Test
     void fencesStaleClaimsAndLock() {
         UUID eventId = newClaimedNormalizedEvent("grouping-test", "ExampleError", 2);
         AtomicBoolean called = new AtomicBoolean();
@@ -610,6 +717,14 @@ class IncidentGroupingPersistenceIntegrationTest {
         LocalDateTime now = LocalDateTime.now();
         incidentRepository.saveAndFlush(new IncidentEntity(incidentId, "grouping-test", "test",
                 "ExampleError", null, status, now.minusMinutes(1), now, now.plusMinutes(10), closedAt, 1));
+        return incidentId;
+    }
+
+    private UUID newTimedIncident(String status, LocalDateTime first, LocalDateTime closedAt) {
+        UUID incidentId = UUID.randomUUID();
+        incidentIds.add(incidentId);
+        incidentRepository.saveAndFlush(new IncidentEntity(incidentId, "grouping-test", "test",
+                "ExampleError", null, status, first, first, first.plusMinutes(30), closedAt, 1));
         return incidentId;
     }
 }
