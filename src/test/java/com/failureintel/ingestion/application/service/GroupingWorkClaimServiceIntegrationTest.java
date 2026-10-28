@@ -39,7 +39,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.Mockito.doAnswer;
 
-@SpringBootTest(properties = "failure-event.processing.retry.max-attempts=3")
+@SpringBootTest(properties = "failure-event.grouping.retry.max-attempts=3")
 class GroupingWorkClaimServiceIntegrationTest {
     private static final String SERVICE_NAME = "grouping-claim-test";
 
@@ -52,7 +52,7 @@ class GroupingWorkClaimServiceIntegrationTest {
     @Autowired private DataSource dataSource;
     @Autowired private GroupingWorkRepository groupingWorkRepository;
     @Autowired private GroupingWorkClaimService claimService;
-    @MockitoSpyBean private FailureEventRetryPolicy retryPolicy;
+    @MockitoSpyBean private GroupingRetryPolicy retryPolicy;
     @Autowired private PlatformTransactionManager transactionManager;
 
     private final List<UUID> eventIds = new ArrayList<>();
@@ -160,7 +160,7 @@ class GroupingWorkClaimServiceIntegrationTest {
                 }
             });
             return maxAttempts;
-        }).when(retryPolicy).getMaxAttempts();
+        }).when(retryPolicy).maxAttempts();
 
         assertThrows(IllegalStateException.class, () -> claimService.claimNextEligibleForProcessing(1));
 

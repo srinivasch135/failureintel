@@ -24,7 +24,7 @@ import java.util.UUID;
 
 /** Applies eligibility outcomes through the existing proxied grouping completion transaction. */
 @Service
-public class GroupingWorkCompletionProcessor implements GroupingWorkProcessor {
+public class GroupingWorkCompletionProcessor {
     private final GroupingCoordinationService coordinationService;
     private final GroupingWorkRepository groupingWorkRepository;
     private final IncidentMembershipRepository membershipRepository;
@@ -49,7 +49,6 @@ public class GroupingWorkCompletionProcessor implements GroupingWorkProcessor {
         this.correctionProperties = correctionProperties;
     }
 
-    @Override
     public void process(ClaimedGroupingWork claim) {
         coordinationService.withCoordination(claim, snapshot -> {
             if (snapshot.alreadyAssociated()) {

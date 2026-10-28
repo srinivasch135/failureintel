@@ -14,11 +14,11 @@ import java.util.List;
 @Service
 public class GroupingWorkClaimService {
     private final GroupingWorkRepository groupingWorkRepository;
-    private final FailureEventRetryPolicy retryPolicy;
+    private final GroupingRetryPolicy retryPolicy;
 
     public GroupingWorkClaimService(
             GroupingWorkRepository groupingWorkRepository,
-            FailureEventRetryPolicy retryPolicy) {
+            GroupingRetryPolicy retryPolicy) {
         this.groupingWorkRepository = groupingWorkRepository;
         this.retryPolicy = retryPolicy;
     }
@@ -31,7 +31,7 @@ public class GroupingWorkClaimService {
 
         LocalDateTime claimedAt = groupingWorkRepository.currentDatabaseTime();
         List<GroupingWorkEntity> eligible = groupingWorkRepository.lockNextEligibleForProcessing(
-                claimedAt, batchSize, retryPolicy.getMaxAttempts());
+                claimedAt, batchSize, retryPolicy.maxAttempts());
         List<ClaimedGroupingWork> claims = new ArrayList<>(eligible.size());
         for (GroupingWorkEntity work : eligible) {
             work.claimForProcessing(claimedAt);

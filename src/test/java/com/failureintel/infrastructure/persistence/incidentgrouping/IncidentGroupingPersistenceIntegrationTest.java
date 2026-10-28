@@ -9,6 +9,10 @@ import com.failureintel.infrastructure.persistence.incidentgrouping.repository.I
 import com.failureintel.ingestion.application.service.ClaimedGroupingWork;
 import com.failureintel.ingestion.application.service.GroupingCoordinationService;
 import com.failureintel.ingestion.application.service.GroupingWorkCompletionProcessor;
+import com.failureintel.ingestion.application.service.GroupingWorkRunner;
+import com.failureintel.ingestion.application.service.GroupingWorkClaimService;
+import com.failureintel.ingestion.application.service.GroupingRetryStateRecorder;
+import com.failureintel.ingestion.application.service.GroupingFailureClassifier;
 import com.failureintel.ingestion.application.service.IncidentClosureProcessor;
 import com.failureintel.test.support.PostgresTestContainer;
 import org.junit.jupiter.api.AfterEach;
@@ -53,6 +57,10 @@ class IncidentGroupingPersistenceIntegrationTest {
     @Autowired private IncidentMembershipRepository membershipRepository;
     @Autowired private GroupingCoordinationService coordinationService;
     @Autowired private GroupingWorkCompletionProcessor completionProcessor;
+    @Autowired private GroupingWorkRunner processingService;
+    @Autowired private GroupingWorkClaimService claimService;
+    @Autowired private GroupingRetryStateRecorder retryRecorder;
+    @Autowired private GroupingFailureClassifier failureClassifier;
     @Autowired private IncidentClosureProcessor closureProcessor;
     @Autowired private PlatformTransactionManager transactionManager;
 
@@ -840,6 +848,93 @@ class IncidentGroupingPersistenceIntegrationTest {
         assertEquals(1, incidents.size());
         assertEquals(2, incidents.get(0).getAssociatedEventCount());
         assertEquals(2, membershipRepository.findByIncidentId(incidents.get(0).getIncidentId()).size());
+    }
+
+    @Test
+    void retryRollbackAndReclaim() {
+        UUID incidentId = newIncident("ACTIVE", null);
+        UUID existingEventId = newNormalizedEvent();
+        LocalDateTime now = utcNow();
+        new TransactionTemplate(transactionManager).executeWithoutResult(transaction -> {
+            groupingWorkRepository.saveAndFlush(new GroupingWorkEntity(
+                    existingEventId, "COMPLETED", 1, now, now, null, null,
+                    null, null, "ASSOCIATED", null));
+            membershipRepository.saveAndFlush(new IncidentMembershipEntity(existingEventId, incidentId));
+        });
+        UUID eventId = newClaimedEvent("ExampleError");
+        IncidentEntity before = incidentRepository.findById(incidentId).orElseThrow();
+        LocalDateTime failureStartedAt = groupingWorkRepository.currentDatabaseTime();
+        jdbcTemplate.execute("CREATE FUNCTION fail_grouping_membership_insert() RETURNS trigger LANGUAGE plpgsql "
+                + "AS $$ BEGIN RAISE EXCEPTION 'temporary failure' USING ERRCODE = '40001'; END $$");
+        jdbcTemplate.execute("CREATE TRIGGER trg_fail_grouping_membership_insert BEFORE INSERT "
+                + "ON incident_membership FOR EACH ROW EXECUTE FUNCTION fail_grouping_membership_insert()");
+
+        try {
+            processingService.process(claimFor(eventId));
+        } finally {
+            removeMembershipFailure();
+        }
+
+        GroupingWorkEntity retried = groupingWorkRepository.findById(eventId).orElseThrow();
+        assertEquals("RETRYABLE", retried.getStatus());
+        assertEquals("GROUPING_DATABASE_TRANSIENT", retried.getFailureCode());
+        assertTrue(retried.getNextAttemptAt().isAfter(failureStartedAt.plusSeconds(55)));
+        assertTrue(retried.getNextAttemptAt().isBefore(failureStartedAt.plusSeconds(65)));
+        assertFalse(membershipRepository.existsById(eventId));
+        assertEquals(before.getAssociatedEventCount(),
+                incidentRepository.findById(incidentId).orElseThrow().getAssociatedEventCount());
+
+        jdbcTemplate.update("UPDATE grouping_work SET next_attempt_at = ? WHERE event_id = ?",
+                groupingWorkRepository.currentDatabaseTime(), eventId);
+        ClaimedGroupingWork retry = claimService.claimNextEligibleForProcessing(1).get(0);
+        assertEquals(2, retry.attemptNumber());
+        processingService.process(retry);
+        processingService.process(retry);
+        assertCompletedAssociation(eventId, 2);
+    }
+
+    @Test
+    void permanentFailureFailed() {
+        UUID eventId = newClaimedEvent("ExampleError");
+
+        assertTrue(retryRecorder.record(claimFor(eventId), failureClassifier.classify(
+                new IllegalArgumentException("invalid grouping state"))));
+
+        assertEquals("FAILED", groupingWorkRepository.findById(eventId).orElseThrow().getStatus());
+    }
+
+    @Test
+    void exhaustedFailureFailed() {
+        UUID eventId = newClaimedNormalizedEvent("grouping-test", "ExampleError", 5);
+
+        assertTrue(retryRecorder.record(new ClaimedGroupingWork(eventId, 5),
+                failureClassifier.classify(new java.sql.SQLException("serialization", "40001"))));
+
+        GroupingWorkEntity failed = groupingWorkRepository.findById(eventId).orElseThrow();
+        assertEquals("FAILED", failed.getStatus());
+        assertEquals("GROUPING_RETRY_EXHAUSTED", failed.getFailureCode());
+    }
+
+    @Test
+    void staleClaimCannotRecord() {
+        UUID eventId = newClaimedNormalizedEvent("grouping-test", "ExampleError", 2);
+
+        assertFalse(retryRecorder.record(new ClaimedGroupingWork(eventId, 1), failureClassifier.classify(
+                new java.sql.SQLException("serialization", "40001"))));
+
+        assertEquals("PROCESSING", groupingWorkRepository.findById(eventId).orElseThrow().getStatus());
+        assertEquals(2, groupingWorkRepository.findById(eventId).orElseThrow().getAttemptCount());
+    }
+
+    @Test
+    void unassignedCompletes() {
+        UUID eventId = newClaimedEvent("ExampleError");
+        jdbcTemplate.update("UPDATE normalized_failure_event SET normalized_service_name = NULL WHERE event_id = ?",
+                eventId);
+
+        processingService.process(claimFor(eventId));
+
+        assertUnassignedWork(eventId, "MISSING_GROUPING_ATTRIBUTES");
     }
 
     private UUID newNormalizedEvent() {

@@ -99,6 +99,40 @@ public class GroupingWorkEntity {
         complete("UNASSIGNED", reason);
     }
 
+    public void markRetryable(LocalDateTime retryAt, String code, String reason) {
+        requireProcessing();
+        if (retryAt == null || code == null || code.isBlank() || reason == null || reason.isBlank()) {
+            throw new IllegalArgumentException("retry details must not be blank");
+        }
+        status = "RETRYABLE";
+        processingStartedAt = null;
+        nextAttemptAt = retryAt;
+        terminalOutcome = null;
+        unassignedReason = null;
+        failureCode = code;
+        failureReason = reason;
+    }
+
+    public void markFailed(String code, String reason) {
+        requireProcessing();
+        if (code == null || code.isBlank() || reason == null || reason.isBlank()) {
+            throw new IllegalArgumentException("failure details must not be blank");
+        }
+        status = "FAILED";
+        processingStartedAt = null;
+        nextAttemptAt = null;
+        terminalOutcome = null;
+        unassignedReason = null;
+        failureCode = code;
+        failureReason = reason;
+    }
+
+    private void requireProcessing() {
+        if (!"PROCESSING".equals(status)) {
+            throw new IllegalStateException("Only processing grouping work can record a failure");
+        }
+    }
+
     private void complete(String outcome, String reason) {
         if (!"PROCESSING".equals(status)) {
             throw new IllegalStateException("Only processing grouping work can be completed");
