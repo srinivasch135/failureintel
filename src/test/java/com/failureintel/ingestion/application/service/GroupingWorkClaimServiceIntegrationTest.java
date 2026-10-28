@@ -52,6 +52,7 @@ class GroupingWorkClaimServiceIntegrationTest {
     @Autowired private DataSource dataSource;
     @Autowired private GroupingWorkRepository groupingWorkRepository;
     @Autowired private GroupingWorkClaimService claimService;
+    @Autowired private GroupingWorkRecoveryService recoveryService;
     @MockitoSpyBean private GroupingRetryPolicy retryPolicy;
     @Autowired private PlatformTransactionManager transactionManager;
 
@@ -189,6 +190,49 @@ class GroupingWorkClaimServiceIntegrationTest {
         assertEquals(eventId, secondClaim.eventId());
         assertEquals(1, firstClaim.attemptNumber());
         assertEquals(2, secondClaim.attemptNumber());
+    }
+
+    @Test
+    void recoversExpiredAndExhausted() {
+        LocalDateTime now = groupingWorkRepository.currentDatabaseTime();
+        UUID expired = newWork("PROCESSING", 1, null, now.minusMinutes(6), null, null);
+        UUID active = newWork("PROCESSING", 1, null, now.minusMinutes(4), null, null);
+        UUID exhausted = newWork("PROCESSING", 3, null, now.minusMinutes(6), null, null);
+
+        assertEquals(2, recoveryService.recoverExpiredClaims(10));
+        GroupingWorkEntity retry = groupingWorkRepository.findById(expired).orElseThrow();
+        assertEquals("RETRYABLE", retry.getStatus());
+        assertEquals(1, retry.getAttemptCount());
+        assertEquals("GROUPING_WORKER_LEASE_EXPIRED", retry.getFailureCode());
+        assertTrue(retry.getNextAttemptAt().isAfter(now));
+        assertTrue(retry.getNextAttemptAt().isBefore(now.plusMinutes(2)));
+        assertEquals("PROCESSING", status(active));
+        assertEquals("FAILED", status(exhausted));
+        assertEquals("GROUPING_RETRY_EXHAUSTED",
+                groupingWorkRepository.findById(exhausted).orElseThrow().getFailureCode());
+    }
+
+    @Test
+    void recoveryRollbackOnFail() {
+        LocalDateTime now = groupingWorkRepository.currentDatabaseTime();
+        UUID eventId = newWork("PROCESSING", 1, null, now.minusMinutes(6), null, null);
+        doAnswer(invocation -> {
+            int maxAttempts = (int) invocation.callRealMethod();
+            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                @Override
+                public void beforeCommit(boolean readOnly) {
+                    throw new IllegalStateException("simulated grouping recovery commit failure");
+                }
+            });
+            return maxAttempts;
+        }).when(retryPolicy).maxAttempts();
+
+        assertThrows(IllegalStateException.class, () -> recoveryService.recoverExpiredClaims(10));
+        GroupingWorkEntity unchanged = groupingWorkRepository.findById(eventId).orElseThrow();
+        assertEquals("PROCESSING", unchanged.getStatus());
+        assertEquals(1, unchanged.getAttemptCount());
+        assertNotNull(unchanged.getProcessingStartedAt());
+        assertNull(unchanged.getNextAttemptAt());
     }
 
     @Test

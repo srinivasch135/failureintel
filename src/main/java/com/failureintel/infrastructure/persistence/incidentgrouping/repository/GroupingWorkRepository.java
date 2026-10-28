@@ -48,4 +48,16 @@ public interface GroupingWorkRepository extends JpaRepository<GroupingWorkEntity
     Optional<GroupingWorkEntity> lockCurrentClaim(
             @Param("eventId") UUID eventId,
             @Param("attemptNumber") int attemptNumber);
+
+    @Query(value = """
+            SELECT * FROM grouping_work
+            WHERE status = 'PROCESSING'
+              AND processing_started_at <= :expiredBefore
+            ORDER BY processing_started_at ASC, event_id ASC
+            LIMIT :batchSize
+            FOR UPDATE SKIP LOCKED
+            """, nativeQuery = true)
+    List<GroupingWorkEntity> lockExpiredProcessingClaims(
+            @Param("expiredBefore") LocalDateTime expiredBefore,
+            @Param("batchSize") int batchSize);
 }

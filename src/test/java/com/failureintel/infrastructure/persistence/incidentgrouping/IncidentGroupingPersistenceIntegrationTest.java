@@ -12,6 +12,7 @@ import com.failureintel.ingestion.application.service.GroupingWorkCompletionProc
 import com.failureintel.ingestion.application.service.GroupingWorkRunner;
 import com.failureintel.ingestion.application.service.GroupingWorkClaimService;
 import com.failureintel.ingestion.application.service.GroupingRetryStateRecorder;
+import com.failureintel.ingestion.application.service.GroupingWorkRecoveryService;
 import com.failureintel.ingestion.application.service.GroupingFailureClassifier;
 import com.failureintel.ingestion.application.service.IncidentClosureProcessor;
 import com.failureintel.test.support.PostgresTestContainer;
@@ -44,7 +45,10 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-@SpringBootTest(properties = "spring.jpa.hibernate.ddl-auto=validate")
+@SpringBootTest(properties = {
+        "spring.jpa.hibernate.ddl-auto=validate",
+        "failure-event.grouping.worker.processing-lease-timeout=PT1M"
+})
 class IncidentGroupingPersistenceIntegrationTest {
     @DynamicPropertySource
     static void postgresProperties(DynamicPropertyRegistry registry) {
@@ -59,6 +63,7 @@ class IncidentGroupingPersistenceIntegrationTest {
     @Autowired private GroupingWorkCompletionProcessor completionProcessor;
     @Autowired private GroupingWorkRunner processingService;
     @Autowired private GroupingWorkClaimService claimService;
+    @Autowired private GroupingWorkRecoveryService recoveryService;
     @Autowired private GroupingRetryStateRecorder retryRecorder;
     @Autowired private GroupingFailureClassifier failureClassifier;
     @Autowired private IncidentClosureProcessor closureProcessor;
@@ -196,6 +201,60 @@ class IncidentGroupingPersistenceIntegrationTest {
 
         assertFalse(closureProcessor.closeIfExpired(incidentId));
         assertEquals(closedAt, incidentRepository.findById(incidentId).orElseThrow().getClosedAt());
+    }
+
+    @Test
+    void recoveryFencesOldOwner() {
+        UUID eventId = newClaimedNormalizedEvent("grouping-test", "ExampleError", 1);
+        ClaimedGroupingWork oldClaim = claimFor(eventId);
+        expireClaim(eventId);
+
+        assertEquals(1, recoveryService.recoverExpiredClaims(10));
+        completionProcessor.process(oldClaim);
+        assertEquals("RETRYABLE", groupingWorkRepository.findById(eventId).orElseThrow().getStatus());
+        assertFalse(membershipRepository.existsById(eventId));
+        assertEquals(0, jdbcTemplate.queryForObject(
+                "SELECT count(*) FROM incident WHERE service_name = 'grouping-test'", Long.class));
+
+        LocalDateTime retryAt = groupingWorkRepository.currentDatabaseTime().minusSeconds(1);
+        jdbcTemplate.update("UPDATE grouping_work SET next_attempt_at = ? WHERE event_id = ?", retryAt, eventId);
+        ClaimedGroupingWork newClaim = claimService.claimNextEligibleForProcessing(10).stream()
+                .filter(claim -> claim.eventId().equals(eventId))
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("recovered grouping work was not reclaimed"));
+        assertEquals(2, newClaim.attemptNumber());
+        completionProcessor.process(oldClaim);
+        assertFalse(membershipRepository.existsById(eventId));
+        completionProcessor.process(newClaim);
+        assertTrue(membershipRepository.existsById(eventId));
+        assertCompletedAssociation(eventId, 1);
+    }
+
+    @Test
+    void completionWinsRecoveryRace() {
+        UUID eventId = newClaimedNormalizedEvent("grouping-test", "ExampleError", 1);
+        expireClaim(eventId);
+        completionProcessor.process(claimFor(eventId));
+
+        assertEquals(0, recoveryService.recoverExpiredClaims(10));
+        assertCompletedAssociation(eventId, 1);
+    }
+
+    @Test
+    void concurrentRecoveryOnce() throws Exception {
+        UUID eventId = newClaimedNormalizedEvent("grouping-test", "ExampleError", 1);
+        expireClaim(eventId);
+        CountDownLatch start = new CountDownLatch(1);
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try {
+            var first = executor.submit(() -> { await(start); return recoveryService.recoverExpiredClaims(10); });
+            var second = executor.submit(() -> { await(start); return recoveryService.recoverExpiredClaims(10); });
+            start.countDown();
+            assertEquals(1, first.get(5, TimeUnit.SECONDS) + second.get(5, TimeUnit.SECONDS));
+            assertEquals("RETRYABLE", groupingWorkRepository.findById(eventId).orElseThrow().getStatus());
+        } finally {
+            executor.shutdownNow();
+        }
     }
 
     @Test
@@ -958,6 +1017,12 @@ class IncidentGroupingPersistenceIntegrationTest {
                 WHERE event_id = ?
                 """, eventId);
         return eventId;
+    }
+
+    private void expireClaim(UUID eventId) {
+        LocalDateTime expiredAt = groupingWorkRepository.currentDatabaseTime().minusMinutes(2);
+        jdbcTemplate.update("UPDATE grouping_work SET processing_started_at = ? WHERE event_id = ?",
+                expiredAt, eventId);
     }
 
     private UUID newClaimedNormalizedEvent(String serviceName, String errorType, int attempt) {

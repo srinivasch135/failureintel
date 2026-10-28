@@ -127,6 +127,16 @@ public class GroupingWorkEntity {
         failureReason = reason;
     }
 
+    public void recoverExpiredLease(LocalDateTime retryAt, boolean exhausted) {
+        requireProcessing();
+        if (exhausted) {
+            markFailed("GROUPING_RETRY_EXHAUSTED", "Grouping worker lease expired after attempts were exhausted");
+        } else {
+            markRetryable(retryAt, "GROUPING_WORKER_LEASE_EXPIRED",
+                    "Grouping worker did not complete the claimed attempt before lease expiry");
+        }
+    }
+
     private void requireProcessing() {
         if (!"PROCESSING".equals(status)) {
             throw new IllegalStateException("Only processing grouping work can record a failure");

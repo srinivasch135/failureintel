@@ -79,17 +79,17 @@ class GroupingWorkProcessingWorkerTest {
         ClaimedGroupingWork failed = claim(1);
         ClaimedGroupingWork succeeds = claim(2);
         when(claims.claimNextEligibleForProcessing(2)).thenReturn(List.of(failed, succeeds));
-        CountDownLatch succeeded = new CountDownLatch(1);
+        CountDownLatch processed = new CountDownLatch(2);
         org.mockito.Mockito.doAnswer(invocation -> {
             ClaimedGroupingWork current = invocation.getArgument(0);
+            processed.countDown();
             if (current.equals(failed)) throw new IllegalStateException("expected test failure");
-            succeeded.countDown();
             return null;
         }).when(processor).process(org.mockito.ArgumentMatchers.any());
 
         worker(claims, processor, 2, 2).processNextBatch();
 
-        assertTrue(succeeded.await(2, TimeUnit.SECONDS));
+        assertTrue(processed.await(2, TimeUnit.SECONDS));
         verify(processor, org.mockito.Mockito.times(2)).process(org.mockito.ArgumentMatchers.any());
     }
 
@@ -136,7 +136,7 @@ class GroupingWorkProcessingWorkerTest {
     @Test
     void configurationValidatesIndependentSettings() {
         GroupingWorkerProperties properties = new GroupingWorkerProperties(
-                false, Duration.ofSeconds(3), 7, 4, Duration.ZERO);
+                false, Duration.ofSeconds(3), Duration.ofMinutes(5), 7, 4, Duration.ZERO);
         assertEquals(7, properties.batchSize());
         assertEquals(4, properties.concurrency());
     }
@@ -148,6 +148,7 @@ class GroupingWorkProcessingWorkerTest {
                 .withPropertyValues(
                         "failure-event.grouping.worker.enabled=true",
                         "failure-event.grouping.worker.fixed-delay=3s",
+                        "failure-event.grouping.worker.processing-lease-timeout=5m",
                         "failure-event.grouping.worker.batch-size=7",
                         "failure-event.grouping.worker.concurrency=4",
                         "failure-event.grouping.worker.shutdown-await=0s")
@@ -161,6 +162,7 @@ class GroupingWorkProcessingWorkerTest {
                 .withPropertyValues(
                         "failure-event.grouping.worker.enabled=false",
                         "failure-event.grouping.worker.fixed-delay=3s",
+                        "failure-event.grouping.worker.processing-lease-timeout=5m",
                         "failure-event.grouping.worker.batch-size=7",
                         "failure-event.grouping.worker.concurrency=4",
                         "failure-event.grouping.worker.shutdown-await=0s")
@@ -179,8 +181,9 @@ class GroupingWorkProcessingWorkerTest {
         executor.setWaitForTasksToCompleteOnShutdown(true);
         executor.setAwaitTerminationMillis(1000);
         executor.initialize();
-        return new GroupingWorkProcessingWorker(claims, processor,
-                new GroupingWorkerProperties(true, Duration.ofSeconds(1), batchSize, concurrency, Duration.ofSeconds(1)),
+        return new GroupingWorkProcessingWorker(claims, mock(GroupingWorkRecoveryService.class), processor,
+                new GroupingWorkerProperties(true, Duration.ofSeconds(1), Duration.ofMinutes(5),
+                        batchSize, concurrency, Duration.ofSeconds(1)),
                 executor);
     }
 
@@ -195,6 +198,11 @@ class GroupingWorkProcessingWorkerTest {
         @Bean
         GroupingWorkClaimService groupingWorkClaimService() {
             return mock(GroupingWorkClaimService.class);
+        }
+
+        @Bean
+        GroupingWorkRecoveryService groupingWorkRecoveryService() {
+            return mock(GroupingWorkRecoveryService.class);
         }
 
         @Bean

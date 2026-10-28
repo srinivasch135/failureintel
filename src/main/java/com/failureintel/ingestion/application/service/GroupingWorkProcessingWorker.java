@@ -15,6 +15,7 @@ public class GroupingWorkProcessingWorker {
     private static final Logger LOGGER = LoggerFactory.getLogger(GroupingWorkProcessingWorker.class);
 
     private final GroupingWorkClaimService claimService;
+    private final GroupingWorkRecoveryService recoveryService;
     private final GroupingWorkProcessor processor;
     private final GroupingWorkerProperties properties;
     private final ThreadPoolTaskExecutor executor;
@@ -22,13 +23,27 @@ public class GroupingWorkProcessingWorker {
 
     public GroupingWorkProcessingWorker(
             GroupingWorkClaimService claimService,
+            GroupingWorkRecoveryService recoveryService,
             GroupingWorkProcessor processor,
             GroupingWorkerProperties properties,
             @Qualifier("groupingWorkExecutor") ThreadPoolTaskExecutor executor) {
         this.claimService = claimService;
+        this.recoveryService = recoveryService;
         this.processor = processor;
         this.properties = properties;
         this.executor = executor;
+    }
+
+    @Scheduled(
+            initialDelayString = "${failure-event.grouping.worker.fixed-delay}",
+            fixedDelayString = "${failure-event.grouping.worker.fixed-delay}")
+    public void recoverExpiredClaims() {
+        try {
+            recoveryService.recoverExpiredClaims(properties.batchSize());
+        } catch (RuntimeException recoveryFailure) {
+            LOGGER.error("Grouping worker could not recover expired claims: batchSize={}",
+                    properties.batchSize(), recoveryFailure);
+        }
     }
 
     @Scheduled(fixedDelayString = "${failure-event.grouping.worker.fixed-delay}")

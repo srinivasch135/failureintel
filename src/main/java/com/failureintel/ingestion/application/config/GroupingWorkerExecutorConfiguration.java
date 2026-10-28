@@ -3,6 +3,7 @@ package com.failureintel.ingestion.application.config;
 import com.failureintel.ingestion.application.service.GroupingWorkClaimService;
 import com.failureintel.ingestion.application.service.GroupingWorkProcessingWorker;
 import com.failureintel.ingestion.application.service.GroupingWorkProcessor;
+import com.failureintel.ingestion.application.service.GroupingWorkRecoveryService;
 import com.failureintel.ingestion.application.service.IncidentClosureProcessor;
 import com.failureintel.ingestion.application.service.IncidentClosureWorker;
 import com.failureintel.infrastructure.persistence.incidentgrouping.repository.IncidentRepository;
@@ -31,10 +32,12 @@ public class GroupingWorkerExecutorConfiguration {
     @Bean
     public GroupingWorkProcessingWorker groupingWorkProcessingWorker(
             GroupingWorkClaimService claimService,
+            GroupingWorkRecoveryService recoveryService,
             GroupingWorkProcessor processor,
             GroupingWorkerProperties properties,
             ThreadPoolTaskExecutor groupingWorkExecutor) {
-        return new GroupingWorkProcessingWorker(claimService, processor, properties, groupingWorkExecutor);
+        return new GroupingWorkProcessingWorker(
+                claimService, recoveryService, processor, properties, groupingWorkExecutor);
     }
 
     @Bean
