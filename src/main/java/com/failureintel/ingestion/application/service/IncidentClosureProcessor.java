@@ -56,7 +56,8 @@ public class IncidentClosureProcessor {
             return false;
         }
 
-        LocalDateTime closureTime = jdbcTemplate.queryForObject("SELECT LOCALTIMESTAMP", LocalDateTime.class);
+        LocalDateTime closureTime = jdbcTemplate.queryForObject(
+                "SELECT clock_timestamp() AT TIME ZONE 'UTC'", LocalDateTime.class);
         if (current.getInactivityExpiresAt().isAfter(closureTime)) {
             return false;
         }

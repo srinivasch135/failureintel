@@ -73,6 +73,8 @@ failure-event:
       delays: ${FAILURE_EVENT_RETRY_DELAYS:PT1M,PT5M,PT30M,PT2H}
       jitter-fraction: ${FAILURE_EVENT_RETRY_JITTER_FRACTION:0.2}
   grouping:
+    historical-correction:
+      window: ${FAILURE_EVENT_GROUPING_HISTORICAL_CORRECTION_WINDOW:24h}
     worker:
       enabled: ${FAILURE_EVENT_GROUPING_WORKER_ENABLED:false}
       fixed-delay: ${FAILURE_EVENT_GROUPING_WORKER_FIXED_DELAY:2s}

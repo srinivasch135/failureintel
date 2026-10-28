@@ -96,4 +96,11 @@ public class IncidentEntity {
         this.status = "CLOSED";
         this.closedAt = closedAt;
     }
+
+    public void recordCorrection() {
+        if (!"CLOSED".equals(status)) {
+            throw new IllegalStateException("Only CLOSED incidents can record a correction");
+        }
+        associatedEventCount++;
+    }
 }

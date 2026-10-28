@@ -1,5 +1,6 @@
 package com.failureintel.ingestion.application.service;
 
+import com.failureintel.ingestion.application.config.HistoricalCorrectionProperties;
 import com.failureintel.ingestion.domain.grouping.CanonicalGroupingSignature;
 import com.failureintel.ingestion.domain.grouping.IncidentGroupingEligibilityEvaluator;
 import com.failureintel.ingestion.domain.grouping.IncidentGroupingEligibilityEvaluator.Decision;
@@ -24,14 +25,12 @@ import java.util.UUID;
 /** Applies eligibility outcomes through the existing proxied grouping completion transaction. */
 @Service
 public class GroupingWorkCompletionProcessor implements GroupingWorkProcessor {
-    private static final IncidentGroupingEligibilityEvaluator.Configuration ELIGIBILITY_CONFIGURATION =
-            IncidentGroupingEligibilityEvaluator.Configuration.DEFAULT;
-
     private final GroupingCoordinationService coordinationService;
     private final GroupingWorkRepository groupingWorkRepository;
     private final IncidentMembershipRepository membershipRepository;
     private final IncidentRepository incidentRepository;
     private final JdbcTemplate jdbcTemplate;
+    private final HistoricalCorrectionProperties correctionProperties;
     private final IncidentGroupingEligibilityEvaluator eligibilityEvaluator =
             new IncidentGroupingEligibilityEvaluator();
 
@@ -40,12 +39,14 @@ public class GroupingWorkCompletionProcessor implements GroupingWorkProcessor {
             GroupingWorkRepository groupingWorkRepository,
             IncidentMembershipRepository membershipRepository,
             IncidentRepository incidentRepository,
-            JdbcTemplate jdbcTemplate) {
+            JdbcTemplate jdbcTemplate,
+            HistoricalCorrectionProperties correctionProperties) {
         this.coordinationService = coordinationService;
         this.groupingWorkRepository = groupingWorkRepository;
         this.membershipRepository = membershipRepository;
         this.incidentRepository = incidentRepository;
         this.jdbcTemplate = jdbcTemplate;
+        this.correctionProperties = correctionProperties;
     }
 
     @Override
@@ -62,7 +63,9 @@ public class GroupingWorkCompletionProcessor implements GroupingWorkProcessor {
                             .toList())
                     .orElseGet(List::of);
             Decision decision = eligibilityEvaluator.evaluate(snapshot.event(), candidates, evaluatedAt,
-                    ELIGIBILITY_CONFIGURATION);
+                    new IncidentGroupingEligibilityEvaluator.Configuration(
+                            IncidentGroupingEligibilityEvaluator.DEFAULT_INACTIVITY_THRESHOLD,
+                            correctionProperties.window()));
             GroupingWorkEntity work = groupingWorkRepository.findById(claim.eventId())
                     .orElseThrow(() -> new IllegalStateException("Claimed grouping work disappeared"));
 
@@ -98,6 +101,11 @@ public class GroupingWorkCompletionProcessor implements GroupingWorkProcessor {
                         && !currentDatabaseTime().isBefore(decision.commitBefore().orElseThrow())) {
                     throw new IllegalStateException(
                             "Historical correction eligibility expired before completion");
+                } else if (decision.outcome() == Outcome.HISTORICAL_CORRECTION) {
+                    jdbcTemplate.queryForObject("SELECT set_config(?, ?, true)", String.class,
+                            "failureintel.historical_correction_deadline",
+                            toDatabaseTime(decision.commitBefore().orElseThrow()).toString());
+                    incident.recordCorrection();
                 }
             }
 
@@ -107,7 +115,7 @@ public class GroupingWorkCompletionProcessor implements GroupingWorkProcessor {
     }
 
     private Instant currentDatabaseTime() {
-        return jdbcTemplate.queryForObject("SELECT LOCALTIMESTAMP", LocalDateTime.class)
+        return jdbcTemplate.queryForObject("SELECT clock_timestamp() AT TIME ZONE 'UTC'", LocalDateTime.class)
                 .toInstant(ZoneOffset.UTC);
     }
 

@@ -34,7 +34,8 @@ public class IncidentClosureWorker {
 
     @Scheduled(fixedDelayString = "${failure-event.grouping.worker.fixed-delay}")
     public void closeExpiredIncidents() {
-        LocalDateTime discoveryTime = jdbcTemplate.queryForObject("SELECT LOCALTIMESTAMP", LocalDateTime.class);
+        LocalDateTime discoveryTime = jdbcTemplate.queryForObject(
+                "SELECT clock_timestamp() AT TIME ZONE 'UTC'", LocalDateTime.class);
         List<IncidentEntity> candidates = incidentRepository.findExpiredActive(
                 discoveryTime, PageRequest.of(0, batchSize));
         for (IncidentEntity candidate : candidates) {

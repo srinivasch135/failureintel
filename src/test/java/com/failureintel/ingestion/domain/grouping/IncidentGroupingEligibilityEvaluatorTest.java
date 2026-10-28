@@ -156,6 +156,15 @@ class IncidentGroupingEligibilityEvaluatorTest {
     }
 
     @Test
+    void closedSignatureMismatch() {
+        IncidentCandidate candidate = closed(INCIDENT_A, T0, T0.plusSeconds(60), T0.minus(Duration.ofDays(1)));
+
+        assertEquals(Outcome.CREATE_INCIDENT,
+                evaluate(event("service", "prod", "Other", "db", T0.plusSeconds(30)),
+                        List.of(candidate), T0).outcome());
+    }
+
+    @Test
     void closedCorrectionRequiresCommitStrictlyBeforeDeadline() {
         Instant closedAt = T0.plus(Duration.ofHours(1));
         Instant deadline = closedAt.plus(Duration.ofHours(24));
@@ -168,6 +177,19 @@ class IncidentGroupingEligibilityEvaluatorTest {
                 UnassignedReason.HISTORICAL_CORRECTION_EXPIRED);
         assertUnassigned(evaluate(historicalEvent, List.of(candidate), deadline.plusNanos(1)),
                 UnassignedReason.HISTORICAL_CORRECTION_EXPIRED);
+    }
+
+    @Test
+    void customWindowDeadline() {
+        Instant closedAt = T0.plus(Duration.ofHours(1));
+        IncidentCandidate candidate = closed(INCIDENT_A, T0, T0.plusSeconds(60), closedAt);
+        Configuration configuration = new Configuration(THIRTY_MINUTES, Duration.ofHours(6));
+
+        Decision decision = evaluator.evaluate(eventAt(T0.plusSeconds(30)), List.of(candidate), closedAt,
+                configuration);
+
+        assertEquals(Outcome.HISTORICAL_CORRECTION, decision.outcome());
+        assertEquals(closedAt.plus(Duration.ofHours(6)), decision.commitBefore().orElseThrow());
     }
 
     @Test

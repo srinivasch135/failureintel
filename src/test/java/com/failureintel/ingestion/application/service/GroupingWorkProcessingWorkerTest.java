@@ -1,6 +1,8 @@
 package com.failureintel.ingestion.application.service;
 
 import com.failureintel.ingestion.application.config.GroupingWorkerProperties;
+import com.failureintel.infrastructure.persistence.incidentgrouping.repository.IncidentRepository;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
@@ -198,6 +200,21 @@ class GroupingWorkProcessingWorkerTest {
         @Bean
         GroupingWorkProcessor groupingWorkProcessor() {
             return mock(GroupingWorkProcessor.class);
+        }
+
+        @Bean
+        IncidentRepository incidentRepository() {
+            return mock(IncidentRepository.class);
+        }
+
+        @Bean
+        IncidentClosureProcessor closureProcessor() {
+            return mock(IncidentClosureProcessor.class);
+        }
+
+        @Bean
+        JdbcTemplate jdbcTemplate() {
+            return mock(JdbcTemplate.class);
         }
     }
 }
