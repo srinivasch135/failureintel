@@ -15,6 +15,7 @@ import com.failureintel.ingestion.application.service.GroupingRetryStateRecorder
 import com.failureintel.ingestion.application.service.GroupingWorkRecoveryService;
 import com.failureintel.ingestion.application.service.GroupingFailureClassifier;
 import com.failureintel.ingestion.application.service.IncidentClosureProcessor;
+import com.failureintel.ingestion.domain.grouping.CanonicalGroupingSignature;
 import com.failureintel.test.support.PostgresTestContainer;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -274,6 +275,8 @@ class IncidentGroupingPersistenceIntegrationTest {
                 IncidentEntity incident = incidentRepository.findById(incidentId).orElseThrow();
                 LocalDateTime occurredAt = utcNow();
                 incident.associateOccurrence(occurredAt, occurredAt.plusMinutes(30));
+                membershipRepository.saveAndFlush(new IncidentMembershipEntity(eventId, incidentId));
+                groupingWorkRepository.findById(eventId).orElseThrow().completeAssociated();
             }));
             assertTrue(groupingLocked.await(5, TimeUnit.SECONDS));
             var closure = executor.submit(() -> closureProcessor.closeIfExpired(incidentId));
@@ -285,7 +288,10 @@ class IncidentGroupingPersistenceIntegrationTest {
             allowGroupingCommit.countDown();
             executor.shutdownNow();
         }
-        assertEquals("ACTIVE", incidentRepository.findById(incidentId).orElseThrow().getStatus());
+        IncidentEntity after = incidentRepository.findById(incidentId).orElseThrow();
+        assertEquals("ACTIVE", after.getStatus());
+        assertEquals(2, after.getAssociatedEventCount());
+        assertCompletedAssociation(eventId, incidentId);
     }
 
     @Test
@@ -335,9 +341,75 @@ class IncidentGroupingPersistenceIntegrationTest {
     }
 
     @Test
-    void expiresAtDatabaseCommit() {
+    void correctsConcurrentHistory() throws Exception {
+        LocalDateTime closedAt = utcNow();
+        UUID incidentId = newTimedIncident("CLOSED", closedAt.minusHours(2), closedAt);
+        IncidentEntity before = incidentRepository.findById(incidentId).orElseThrow();
+        UUID firstEvent = newClaimedEvent("ExampleError");
+        UUID secondEvent = newClaimedEvent("ExampleError");
+        jdbcTemplate.update("UPDATE normalized_failure_event SET normalized_occurred_at = ? WHERE event_id IN (?, ?)",
+                before.getFirstOccurredAt(), firstEvent, secondEvent);
+
+        raceClaims(firstEvent, secondEvent);
+
+        IncidentEntity after = incidentRepository.findById(incidentId).orElseThrow();
+        assertEquals("CLOSED", after.getStatus());
+        assertEquals(before.getFirstOccurredAt(), after.getFirstOccurredAt());
+        assertEquals(before.getLastOccurredAt(), after.getLastOccurredAt());
+        assertEquals(before.getClosedAt(), after.getClosedAt());
+        assertEquals(3, after.getAssociatedEventCount());
+        assertEquals(2, jdbcTemplate.queryForObject(
+                "SELECT count(*) FROM incident_membership WHERE incident_id = ?", Long.class, incidentId));
+        assertCompletedAssociation(firstEvent, incidentId);
+        assertCompletedAssociation(secondEvent, incidentId);
+    }
+
+    @Test
+    void racesDuplicateCompletion() throws Exception {
+        LocalDateTime closedAt = utcNow();
+        UUID incidentId = newIncident("CLOSED", closedAt);
+        IncidentEntity before = incidentRepository.findById(incidentId).orElseThrow();
+        UUID eventId = newClaimedEvent("ExampleError");
+        jdbcTemplate.update("UPDATE normalized_failure_event SET normalized_occurred_at = ? WHERE event_id = ?",
+                before.getLastOccurredAt(), eventId);
+        CountDownLatch locked = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        ExecutorService executor = Executors.newFixedThreadPool(3);
+        try {
+            var holder = executor.submit(() -> new TransactionTemplate(transactionManager).executeWithoutResult(
+                    transaction -> {
+                        jdbcTemplate.queryForObject("SELECT event_id FROM grouping_work WHERE event_id = ? FOR UPDATE",
+                                UUID.class, eventId);
+                        locked.countDown();
+                        await(release);
+                    }));
+            assertTrue(locked.await(5, TimeUnit.SECONDS));
+            var first = executor.submit(() -> completionProcessor.process(claimFor(eventId)));
+            var second = executor.submit(() -> completionProcessor.process(claimFor(eventId)));
+            awaitClaimWait();
+            release.countDown();
+            first.get(10, TimeUnit.SECONDS);
+            second.get(10, TimeUnit.SECONDS);
+            holder.get(5, TimeUnit.SECONDS);
+        } finally {
+            release.countDown();
+            executor.shutdownNow();
+        }
+        IncidentEntity after = incidentRepository.findById(incidentId).orElseThrow();
+        assertEquals("CLOSED", after.getStatus());
+        assertEquals(before.getAssociatedEventCount() + 1, after.getAssociatedEventCount());
+        assertEquals(before.getFirstOccurredAt(), after.getFirstOccurredAt());
+        assertEquals(before.getLastOccurredAt(), after.getLastOccurredAt());
+        assertEquals(before.getClosedAt(), after.getClosedAt());
+        assertCompletedAssociation(eventId, incidentId);
+        assertEquals(1, jdbcTemplate.queryForObject(
+                "SELECT count(*) FROM incident WHERE service_name = 'grouping-test'", Long.class));
+    }
+
+    @Test
+    void expiresAtDatabaseCommit() throws Exception {
         LocalDateTime closedAt = jdbcTemplate.queryForObject(
-                "SELECT (clock_timestamp() AT TIME ZONE 'UTC') - INTERVAL '24 hours' + INTERVAL '2 seconds'",
+                "SELECT (clock_timestamp() AT TIME ZONE 'UTC') - INTERVAL '24 hours' + INTERVAL '10 seconds'",
                 LocalDateTime.class);
         LocalDateTime first = closedAt.minusHours(2);
         LocalDateTime last = closedAt.minusHours(1);
@@ -346,15 +418,27 @@ class IncidentGroupingPersistenceIntegrationTest {
         UUID eventId = newClaimedEvent("ExampleError");
         jdbcTemplate.update("UPDATE normalized_failure_event SET normalized_occurred_at = ? WHERE event_id = ?",
                 last, eventId);
-        jdbcTemplate.execute("CREATE FUNCTION delay_membership_insert() RETURNS trigger LANGUAGE plpgsql "
-                + "AS $$ BEGIN PERFORM pg_sleep(3); RETURN NEW; END $$");
-        jdbcTemplate.execute("CREATE TRIGGER trg_delay_membership BEFORE INSERT ON incident_membership "
-                + "FOR EACH ROW EXECUTE FUNCTION delay_membership_insert()");
+        CountDownLatch rowLocked = new CountDownLatch(1);
+        CountDownLatch releaseRow = new CountDownLatch(1);
+        ExecutorService executor = Executors.newFixedThreadPool(2);
         try {
-            completeClaim(eventId);
+            var holder = executor.submit(() -> new TransactionTemplate(transactionManager).executeWithoutResult(
+                    transaction -> {
+                        jdbcTemplate.queryForObject("SELECT incident_id FROM incident WHERE incident_id = ? FOR UPDATE",
+                                UUID.class, incidentId);
+                        rowLocked.countDown();
+                        awaitFor(releaseRow, 15);
+                    }));
+            assertTrue(rowLocked.await(5, TimeUnit.SECONDS));
+            var grouping = executor.submit(() -> completeClaim(eventId));
+            awaitRowWait();
+            awaitDeadline(closedAt.plusHours(24));
+            releaseRow.countDown();
+            holder.get(5, TimeUnit.SECONDS);
+            grouping.get(10, TimeUnit.SECONDS);
         } finally {
-            jdbcTemplate.execute("DROP TRIGGER IF EXISTS trg_delay_membership ON incident_membership");
-            jdbcTemplate.execute("DROP FUNCTION IF EXISTS delay_membership_insert()");
+            releaseRow.countDown();
+            executor.shutdownNow();
         }
 
         assertUnassignedWork(eventId, "HISTORICAL_CORRECTION_EXPIRED");
@@ -892,14 +976,33 @@ class IncidentGroupingPersistenceIntegrationTest {
     void groupsConcurrentEventsOnce() throws Exception {
         UUID firstEvent = newClaimedNormalizedEvent("grouping-test", "ExampleError", 1);
         UUID secondEvent = newClaimedNormalizedEvent("grouping-test", "ExampleError", 1);
-        ExecutorService executor = Executors.newFixedThreadPool(2);
+        CountDownLatch lockHeld = new CountDownLatch(1);
+        CountDownLatch releaseLock = new CountDownLatch(1);
+        ExecutorService executor = Executors.newFixedThreadPool(3);
+        jdbcTemplate.execute("CREATE FUNCTION hold_incident_insert() RETURNS trigger LANGUAGE plpgsql "
+                + "AS $$ BEGIN PERFORM pg_advisory_xact_lock(881772201); RETURN NEW; END $$");
+        jdbcTemplate.execute("CREATE TRIGGER trg_hold_incident_insert BEFORE INSERT ON incident "
+                + "FOR EACH ROW EXECUTE FUNCTION hold_incident_insert()");
         try {
-            var first = executor.submit(() -> completionProcessor.process(new ClaimedGroupingWork(firstEvent, 1)));
-            var second = executor.submit(() -> completionProcessor.process(new ClaimedGroupingWork(secondEvent, 1)));
+            var blocker = executor.submit(() -> new TransactionTemplate(transactionManager).executeWithoutResult(
+                    transaction -> {
+                        jdbcTemplate.execute("SELECT pg_advisory_xact_lock(881772201)");
+                        lockHeld.countDown();
+                        await(releaseLock);
+                    }));
+            assertTrue(lockHeld.await(5, TimeUnit.SECONDS));
+            var first = executor.submit(() -> completionProcessor.process(claimFor(firstEvent)));
+            var second = executor.submit(() -> completionProcessor.process(claimFor(secondEvent)));
+            awaitGroupingRace();
+            releaseLock.countDown();
             first.get(10, TimeUnit.SECONDS);
             second.get(10, TimeUnit.SECONDS);
+            blocker.get(5, TimeUnit.SECONDS);
         } finally {
+            releaseLock.countDown();
             executor.shutdownNow();
+            jdbcTemplate.execute("DROP TRIGGER IF EXISTS trg_hold_incident_insert ON incident");
+            jdbcTemplate.execute("DROP FUNCTION IF EXISTS hold_incident_insert()");
         }
 
         List<IncidentEntity> incidents = incidentRepository.findHistoryBySignature(
@@ -1051,6 +1154,44 @@ class IncidentGroupingPersistenceIntegrationTest {
         completionProcessor.process(claimFor(eventId));
     }
 
+    private void raceClaims(UUID first, UUID second) throws Exception {
+        long key = CanonicalGroupingSignature.fromFields("grouping-test", "test", "ExampleError", null)
+                .orElseThrow().advisoryLockKey();
+        CountDownLatch locked = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        ExecutorService executor = Executors.newFixedThreadPool(3);
+        try {
+            var blocker = executor.submit(() -> new TransactionTemplate(transactionManager).executeWithoutResult(
+                    transaction -> {
+                        jdbcTemplate.execute("SELECT pg_advisory_xact_lock(" + key + ")");
+                        locked.countDown();
+                        await(release);
+                    }));
+            assertTrue(locked.await(5, TimeUnit.SECONDS));
+            var one = executor.submit(() -> completionProcessor.process(claimFor(first)));
+            var two = executor.submit(() -> completionProcessor.process(claimFor(second)));
+            awaitGroupingRace();
+            release.countDown();
+            one.get(10, TimeUnit.SECONDS);
+            two.get(10, TimeUnit.SECONDS);
+            blocker.get(5, TimeUnit.SECONDS);
+        } finally {
+            release.countDown();
+            executor.shutdownNow();
+        }
+    }
+
+    private void assertCompletedAssociation(UUID eventId, UUID incidentId) {
+        assertEquals(incidentId, jdbcTemplate.queryForObject(
+                "SELECT incident_id FROM incident_membership WHERE event_id = ?", UUID.class, eventId));
+        assertEquals(1, jdbcTemplate.queryForObject(
+                "SELECT count(*) FROM incident_membership WHERE event_id = ?", Long.class, eventId));
+        assertEquals("COMPLETED", jdbcTemplate.queryForObject(
+                "SELECT status FROM grouping_work WHERE event_id = ?", String.class, eventId));
+        assertEquals("ASSOCIATED", jdbcTemplate.queryForObject(
+                "SELECT terminal_outcome FROM grouping_work WHERE event_id = ?", String.class, eventId));
+    }
+
     private void assertCompletedAssociation(UUID eventId, long expectedAggregateCount) {
         IncidentMembershipEntity membership = membershipRepository.findById(eventId).orElseThrow();
         IncidentEntity incident = incidentRepository.findById(membership.getIncidentId()).orElseThrow();
@@ -1126,6 +1267,17 @@ class IncidentGroupingPersistenceIntegrationTest {
         }
     }
 
+    private static void awaitFor(CountDownLatch latch, int seconds) {
+        try {
+            if (!latch.await(seconds, TimeUnit.SECONDS)) {
+                throw new IllegalStateException("Timed out waiting for test coordination");
+            }
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("Interrupted while waiting for test coordination", exception);
+        }
+    }
+
     private void awaitAdvisoryWait() throws InterruptedException {
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
         while (System.nanoTime() < deadline) {
@@ -1137,6 +1289,61 @@ class IncidentGroupingPersistenceIntegrationTest {
             Thread.sleep(10);
         }
         throw new AssertionError("Closure did not wait for the grouping advisory lock");
+    }
+
+    private void awaitRowWait() throws InterruptedException {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (System.nanoTime() < deadline) {
+            Long waiting = jdbcTemplate.queryForObject("SELECT count(*) FROM pg_stat_activity "
+                    + "WHERE wait_event_type = 'Lock' AND pid <> pg_backend_pid()", Long.class);
+            if (waiting != null && waiting > 0) {
+                return;
+            }
+            Thread.yield();
+        }
+        throw new AssertionError("Grouping did not wait for the incident row lock");
+    }
+
+    private void awaitClaimWait() throws InterruptedException {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (System.nanoTime() < deadline) {
+            Long waiting = jdbcTemplate.queryForObject("SELECT count(*) FROM pg_stat_activity "
+                    + "WHERE wait_event_type = 'Lock' AND pid <> pg_backend_pid()", Long.class);
+            if (waiting != null && waiting >= 2) {
+                return;
+            }
+            Thread.sleep(10);
+            Thread.yield();
+        }
+        throw new AssertionError("Both duplicate claims did not wait on the grouping work row");
+    }
+
+    private void awaitGroupingRace() throws InterruptedException {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (System.nanoTime() < deadline) {
+            Long waiting = jdbcTemplate.queryForObject("SELECT count(*) FROM pg_stat_activity "
+                    + "WHERE wait_event_type = 'Lock' AND pid <> pg_backend_pid()", Long.class);
+            if (waiting != null && waiting >= 2) {
+                return;
+            }
+            Thread.sleep(10);
+            Thread.yield();
+        }
+        throw new AssertionError("Concurrent grouping transactions did not both reach PostgreSQL locks");
+    }
+
+    private void awaitDeadline(LocalDateTime correctionDeadline) throws InterruptedException {
+        long timeout = System.nanoTime() + TimeUnit.SECONDS.toNanos(15);
+        while (System.nanoTime() < timeout) {
+            Boolean expired = jdbcTemplate.queryForObject(
+                    "SELECT (clock_timestamp() AT TIME ZONE 'UTC') >= ?", Boolean.class, correctionDeadline);
+            if (Boolean.TRUE.equals(expired)) {
+                return;
+            }
+            Thread.sleep(10);
+            Thread.yield();
+        }
+        throw new AssertionError("Historical correction deadline did not pass");
     }
 
     private UUID newIncident(String status, LocalDateTime closedAt) {
