@@ -929,6 +929,60 @@ class IncidentGroupingPersistenceIntegrationTest {
     }
 
     @Test
+    void retriesAfterCreateRollback() {
+        UUID eventId = newClaimedEvent("ExampleError");
+        installMembershipFailure();
+        try {
+            processingService.process(claimFor(eventId));
+        } finally {
+            removeMembershipFailure();
+        }
+
+        GroupingWorkEntity retryable = groupingWorkRepository.findById(eventId).orElseThrow();
+        assertEquals("RETRYABLE", retryable.getStatus());
+        assertEquals(1, retryable.getAttemptCount());
+        assertEquals(0, jdbcTemplate.queryForObject(
+                "SELECT count(*) FROM incident WHERE service_name = 'grouping-test'", Long.class));
+        assertFalse(membershipRepository.existsById(eventId));
+        assertEquals("NORMALIZED", jdbcTemplate.queryForObject(
+                "SELECT processing_status FROM failure_event WHERE event_id = ?", String.class, eventId));
+        assertEquals(1, jdbcTemplate.queryForObject(
+                "SELECT count(*) FROM normalized_failure_event WHERE event_id = ?", Long.class, eventId));
+
+        jdbcTemplate.update("UPDATE grouping_work SET next_attempt_at = ? WHERE event_id = ?",
+                groupingWorkRepository.currentDatabaseTime().minusSeconds(1), eventId);
+        ClaimedGroupingWork retry = claimService.claimNextEligibleForProcessing(10).stream()
+                .filter(claim -> claim.eventId().equals(eventId)).findFirst().orElseThrow();
+        processingService.process(retry);
+        processingService.process(retry);
+
+        assertCompletedAssociation(eventId, 1);
+        assertEquals(1, jdbcTemplate.queryForObject(
+                "SELECT count(*) FROM incident WHERE service_name = 'grouping-test'", Long.class));
+    }
+
+    @Test
+    void exhaustsCreateRollback() {
+        UUID eventId = newClaimedNormalizedEvent("grouping-test", "ExampleError", 5);
+        installMembershipFailure();
+        try {
+            processingService.process(new ClaimedGroupingWork(eventId, 5));
+        } finally {
+            removeMembershipFailure();
+        }
+
+        GroupingWorkEntity failed = groupingWorkRepository.findById(eventId).orElseThrow();
+        assertEquals("FAILED", failed.getStatus());
+        assertEquals("GROUPING_RETRY_EXHAUSTED", failed.getFailureCode());
+        assertEquals(5, failed.getAttemptCount());
+        assertEquals(0, jdbcTemplate.queryForObject(
+                "SELECT count(*) FROM incident WHERE service_name = 'grouping-test'", Long.class));
+        assertFalse(membershipRepository.existsById(eventId));
+        assertTrue(claimService.claimNextEligibleForProcessing(10).stream()
+                .noneMatch(claim -> claim.eventId().equals(eventId)));
+    }
+
+    @Test
     void acceptsInBoundsCorrection() {
         UUID eventId = newClaimedNormalizedEvent("grouping-test", "ExampleError", 1);
         UUID incidentId = newIncident("CLOSED", utcNow());
@@ -1223,7 +1277,7 @@ class IncidentGroupingPersistenceIntegrationTest {
 
     private void installMembershipFailure() {
         jdbcTemplate.execute("CREATE FUNCTION fail_grouping_membership_insert() RETURNS trigger LANGUAGE plpgsql "
-                + "AS $$ BEGIN RAISE EXCEPTION 'injected membership failure'; END $$");
+                + "AS $$ BEGIN RAISE EXCEPTION 'injected membership failure' USING ERRCODE = '40001'; END $$");
         jdbcTemplate.execute("CREATE TRIGGER trg_fail_grouping_membership_insert BEFORE INSERT "
                 + "ON incident_membership FOR EACH ROW EXECUTE FUNCTION fail_grouping_membership_insert()");
     }
