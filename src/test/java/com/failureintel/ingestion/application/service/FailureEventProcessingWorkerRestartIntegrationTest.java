@@ -13,6 +13,8 @@ import org.springframework.boot.WebApplicationType;
 import org.springframework.boot.builder.SpringApplicationBuilder;
 import org.springframework.context.ConfigurableApplicationContext;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.sql.Timestamp;
 import java.time.Duration;
@@ -27,6 +29,63 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class FailureEventProcessingWorkerRestartIntegrationTest {
+
+    @Test
+    void groupingPauseAndResume() {
+        UUID eventId;
+        try (ConfigurableApplicationContext normalizationContext = startApplicationContext(true, false)) {
+            var request = validRequest("grouping-pause-" + UUID.randomUUID());
+            request.setServiceName("grouping-pause-" + UUID.randomUUID());
+            eventId = UUID.fromString(normalizationContext.getBean(FailureEventIngestionService.class)
+                    .ingestFailureEvent(request));
+
+            Awaitility.await().atMost(Duration.ofSeconds(10)).untilAsserted(() -> {
+                assertEquals(ProcessingStatus.NORMALIZED,
+                        normalizationContext.getBean(FailureEventRepository.class)
+                                .findById(eventId).orElseThrow().getProcessingStatus());
+                assertEquals(1, normalizationContext.getBean(JdbcTemplate.class).queryForObject(
+                        "SELECT COUNT(*) FROM grouping_work WHERE event_id = ? AND status = 'PENDING'",
+                        Integer.class, eventId));
+                assertEquals(0, normalizationContext.getBean(JdbcTemplate.class).queryForObject(
+                        "SELECT attempt_count FROM grouping_work WHERE event_id = ?", Integer.class, eventId));
+            });
+        }
+
+        try (ConfigurableApplicationContext pausedContext = startApplicationContext(false, false)) {
+            Awaitility.await().during(Duration.ofMillis(400)).atMost(Duration.ofSeconds(2)).untilAsserted(() -> {
+                assertEquals("PENDING", pausedContext.getBean(GroupingWorkRepository.class)
+                        .findById(eventId).orElseThrow().getStatus());
+                assertEquals(0, pausedContext.getBean(JdbcTemplate.class).queryForObject(
+                        "SELECT attempt_count FROM grouping_work WHERE event_id = ?", Integer.class, eventId));
+            });
+        }
+
+        try (ConfigurableApplicationContext groupingContext = startApplicationContext(false, true)) {
+            JdbcTemplate jdbcTemplate = groupingContext.getBean(JdbcTemplate.class);
+            Awaitility.await().atMost(Duration.ofSeconds(10)).untilAsserted(() -> {
+                assertEquals("COMPLETED", groupingContext.getBean(GroupingWorkRepository.class)
+                        .findById(eventId).orElseThrow().getStatus());
+                assertEquals(1, groupingContext.getBean(JdbcTemplate.class).queryForObject(
+                        "SELECT COUNT(*) FROM incident_membership WHERE event_id = ?", Integer.class, eventId));
+                assertEquals(1, groupingContext.getBean(JdbcTemplate.class).queryForObject(
+                        "SELECT attempt_count FROM grouping_work WHERE event_id = ?", Integer.class, eventId));
+                assertEquals(ProcessingStatus.NORMALIZED,
+                        groupingContext.getBean(FailureEventRepository.class)
+                                .findById(eventId).orElseThrow().getProcessingStatus());
+                assertEquals(1, countNormalized(groupingContext.getBean(JdbcTemplate.class), eventId));
+            });
+            UUID incidentId = jdbcTemplate.queryForObject(
+                    "SELECT incident_id FROM incident_membership WHERE event_id = ?", UUID.class, eventId);
+            new TransactionTemplate(groupingContext.getBean(PlatformTransactionManager.class))
+                    .executeWithoutResult(transaction -> {
+                        jdbcTemplate.update("DELETE FROM incident_membership WHERE event_id = ?", eventId);
+                        jdbcTemplate.update("DELETE FROM grouping_work WHERE event_id = ?", eventId);
+                        jdbcTemplate.update("DELETE FROM incident WHERE incident_id = ?", incidentId);
+                        groupingContext.getBean(NormalizedFailureEventRepository.class).deleteById(eventId);
+                        groupingContext.getBean(FailureEventRepository.class).deleteById(eventId);
+                    });
+        }
+    }
 
     @Test
     void shouldResumePersistedWorkAfterRestart() {
@@ -180,6 +239,11 @@ class FailureEventProcessingWorkerRestartIntegrationTest {
     }
 
     private ConfigurableApplicationContext startApplicationContext(boolean workerEnabled) {
+        return startApplicationContext(workerEnabled, false);
+    }
+
+    private ConfigurableApplicationContext startApplicationContext(
+            boolean normalizationEnabled, boolean groupingEnabled) {
         return new SpringApplicationBuilder(FailureintelApplication.class)
                 .web(WebApplicationType.NONE)
                 .registerShutdownHook(false)
@@ -189,10 +253,14 @@ class FailureEventProcessingWorkerRestartIntegrationTest {
                         "--spring.datasource.username=" + PostgresTestContainer.username(),
                         "--spring.datasource.password=" + PostgresTestContainer.password(),
                         "--spring.jpa.hibernate.ddl-auto=validate",
-                        "--failure-event.processing.worker.enabled=" + workerEnabled,
+                        "--failure-event.processing.worker.enabled=" + normalizationEnabled,
                         "--failure-event.processing.worker.fixed-delay=100ms",
                         "--failure-event.processing.worker.recovery-scan-interval=100ms",
                         "--failure-event.processing.worker.shutdown-await=5s",
+                        "--failure-event.grouping.worker.enabled=" + groupingEnabled,
+                        "--failure-event.grouping.worker.fixed-delay=100ms",
+                        "--failure-event.grouping.worker.processing-lease-timeout=200ms",
+                        "--failure-event.grouping.worker.shutdown-await=5s",
                         "--failure-event.processing.retry.delays=PT1M",
                         "--spring.main.banner-mode=off");
     }
