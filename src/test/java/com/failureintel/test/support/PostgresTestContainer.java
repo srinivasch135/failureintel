@@ -27,6 +27,7 @@ public final class PostgresTestContainer {
             "failureintel_normalization_processor_test",
             "failureintel_normalization_rollback_test",
             "failureintel_pipeline_test",
+            "failureintel_grouping_pipeline_test",
             "failureintel_recovery_schedule_test",
             "failureintel_worker_restart_test");
 
