@@ -15,6 +15,8 @@ import com.failureintel.ingestion.application.service.GroupingRetryStateRecorder
 import com.failureintel.ingestion.application.service.GroupingWorkRecoveryService;
 import com.failureintel.ingestion.application.service.GroupingFailureClassifier;
 import com.failureintel.ingestion.application.service.IncidentClosureProcessor;
+import com.failureintel.infrastructure.monitoring.metrics.GroupingWorkMetrics;
+import io.micrometer.core.instrument.MeterRegistry;
 import com.failureintel.ingestion.domain.grouping.CanonicalGroupingSignature;
 import com.failureintel.test.support.PostgresTestContainer;
 import org.junit.jupiter.api.AfterEach;
@@ -69,6 +71,8 @@ class IncidentGroupingPersistenceIntegrationTest {
     @Autowired private GroupingFailureClassifier failureClassifier;
     @Autowired private IncidentClosureProcessor closureProcessor;
     @Autowired private PlatformTransactionManager transactionManager;
+    @Autowired private GroupingWorkMetrics groupingMetrics;
+    @Autowired private MeterRegistry meterRegistry;
 
     private final List<UUID> eventIds = new ArrayList<>();
     private final List<UUID> incidentIds = new ArrayList<>();
@@ -148,6 +152,88 @@ class IncidentGroupingPersistenceIntegrationTest {
                 anotherEvent, "PENDING", 0, now, null, null, null, null, null, null, null));
         assertThrows(RuntimeException.class, () -> membershipRepository.saveAndFlush(
                 new IncidentMembershipEntity(anotherEvent, UUID.randomUUID())));
+    }
+
+    @Test
+    void countsPersistedWork() {
+        long pendingBefore = stateCount("pending");
+        long processingBefore = stateCount("processing");
+        long retryableBefore = stateCount("retryable");
+        long completedBefore = stateCount("completed");
+        long failedBefore = stateCount("failed");
+        long unfinishedBefore = gaugeValue("failureintel.grouping.work.unfinished", null, null);
+        long claimableBefore = gaugeValue("failureintel.grouping.work.claimable", null, null);
+        long associatedBefore = outcomeCount("associated");
+        long unassignedBefore = outcomeCount("unassigned");
+        long expiredBefore = reasonCount("historical_correction_expired");
+        long exhaustedBefore = gaugeValue("failureintel.grouping.work.retry.exhausted", null, null);
+        long permanentBefore = gaugeValue("failureintel.grouping.work.failure.permanent", null, null);
+
+        LocalDateTime now = utcNow();
+        saveWork("PENDING", 0, null, null, null, null);
+        saveWork("PROCESSING", 1, now, null, null, null);
+        saveWork("RETRYABLE", 1, now, now.minusMinutes(1), "TEMPORARY", "retry");
+        saveWork("RETRYABLE", 1, now, now.plusHours(1), "TEMPORARY", "retry");
+        saveWork("FAILED", 3, null, null, "GROUPING_RETRY_EXHAUSTED", "exhausted");
+        saveWork("FAILED", 1, null, null, "PERMANENT_FAILURE", "permanent");
+
+        UUID associated = newClaimedEvent("ExampleError");
+        completeClaim(associated);
+        UUID unassigned = newClaimedEvent("ExampleError");
+        jdbcTemplate.update("UPDATE normalized_failure_event SET normalized_service_name = NULL WHERE event_id = ?",
+                unassigned);
+        completeClaim(unassigned);
+        UUID expired = newNormalizedEvent();
+        groupingWorkRepository.saveAndFlush(new GroupingWorkEntity(expired, "COMPLETED", 1, now, now, null,
+                null, null, null, "UNASSIGNED", "HISTORICAL_CORRECTION_EXPIRED"));
+
+        assertEquals(pendingBefore + 1, stateCount("pending"));
+        assertEquals(processingBefore + 1, stateCount("processing"));
+        assertEquals(retryableBefore + 2, stateCount("retryable"));
+        assertEquals(completedBefore + 3, stateCount("completed"));
+        assertEquals(failedBefore + 2, stateCount("failed"));
+        assertEquals(unfinishedBefore + 4,
+                gaugeValue("failureintel.grouping.work.unfinished", null, null));
+        assertEquals(claimableBefore + 2,
+                gaugeValue("failureintel.grouping.work.claimable", null, null));
+        assertEquals(associatedBefore + 1, outcomeCount("associated"));
+        assertEquals(unassignedBefore + 2, outcomeCount("unassigned"));
+        assertEquals(stateCount("completed"), outcomeCount("associated") + outcomeCount("unassigned"));
+        assertEquals(reasonCount("historical_correction_expired"), expiredBefore + 1);
+        assertEquals(exhaustedBefore + 1,
+                gaugeValue("failureintel.grouping.work.retry.exhausted", null, null));
+        assertEquals(permanentBefore + 1,
+                gaugeValue("failureintel.grouping.work.failure.permanent", null, null));
+        assertEquals("COMPLETED", groupingWorkRepository.findById(unassigned).orElseThrow().getStatus());
+    }
+
+    @Test
+    void recordsCorrectionCommit() {
+        double before = counterValue("failureintel.grouping.historical.correction.accepted", null);
+        new TransactionTemplate(transactionManager).executeWithoutResult(
+                transaction -> groupingMetrics.recordCorrectionAccepted());
+        assertEquals(before + 1, counterValue("failureintel.grouping.historical.correction.accepted", null));
+
+        new TransactionTemplate(transactionManager).executeWithoutResult(transaction -> {
+            groupingMetrics.recordCorrectionAccepted();
+            transaction.setRollbackOnly();
+        });
+        assertEquals(before + 1, counterValue("failureintel.grouping.historical.correction.accepted", null));
+    }
+
+    @Test
+    void countsCorrectionOnce() {
+        double before = counterValue("failureintel.grouping.historical.correction.accepted", null);
+        UUID eventId = newClaimedEvent("ExampleError");
+        IncidentEntity closed = incidentRepository.findById(newIncident("CLOSED", utcNow())).orElseThrow();
+        jdbcTemplate.update("UPDATE normalized_failure_event SET normalized_occurred_at = ? WHERE event_id = ?",
+                closed.getLastOccurredAt().minusSeconds(30), eventId);
+
+        completionProcessor.process(claimFor(eventId));
+
+        assertEquals(before + 1, counterValue("failureintel.grouping.historical.correction.accepted", null));
+        completionProcessor.process(claimFor(eventId));
+        assertEquals(before + 1, counterValue("failureintel.grouping.historical.correction.accepted", null));
     }
 
     @Test
@@ -1174,6 +1260,43 @@ class IncidentGroupingPersistenceIntegrationTest {
                 WHERE event_id = ?
                 """, eventId);
         return eventId;
+    }
+
+    private UUID saveWork(String status, int attempts, LocalDateTime lastAttemptAt,
+            LocalDateTime nextAttemptAt, String failureCode, String failureReason) {
+        UUID eventId = newNormalizedEvent();
+        LocalDateTime processingAt = "PROCESSING".equals(status) ? lastAttemptAt : null;
+        groupingWorkRepository.saveAndFlush(new GroupingWorkEntity(eventId, status, attempts, utcNow(),
+                lastAttemptAt, processingAt, nextAttemptAt, failureCode, failureReason, null, null));
+        return eventId;
+    }
+
+    private long stateCount(String status) {
+        return gaugeValue("failureintel.grouping.work.state", "status", status);
+    }
+
+    private long outcomeCount(String outcome) {
+        return gaugeValue("failureintel.grouping.work.outcome", "outcome", outcome);
+    }
+
+    private long reasonCount(String reason) {
+        return gaugeValue("failureintel.grouping.work.unassigned.reason", "reason", reason);
+    }
+
+    private long gaugeValue(String name, String tag, String value) {
+        var search = meterRegistry.find(name);
+        if (tag != null) {
+            search = search.tag(tag, value);
+        }
+        return (long) search.gauge().value();
+    }
+
+    private double counterValue(String name, String result) {
+        var search = meterRegistry.find(name);
+        if (result != null) {
+            search = search.tag("result", result);
+        }
+        return search.counter().count();
     }
 
     private void expireClaim(UUID eventId) {

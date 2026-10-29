@@ -3,6 +3,7 @@ package com.failureintel.ingestion.application.service;
 import com.failureintel.infrastructure.persistence.incidentgrouping.entity.GroupingWorkEntity;
 import com.failureintel.infrastructure.persistence.incidentgrouping.repository.GroupingWorkRepository;
 import com.failureintel.test.support.PostgresTestContainer;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -55,6 +56,7 @@ class GroupingWorkClaimServiceIntegrationTest {
     @Autowired private GroupingWorkRecoveryService recoveryService;
     @MockitoSpyBean private GroupingRetryPolicy retryPolicy;
     @Autowired private PlatformTransactionManager transactionManager;
+    @Autowired private MeterRegistry meterRegistry;
 
     private final List<UUID> eventIds = new ArrayList<>();
 
@@ -194,6 +196,8 @@ class GroupingWorkClaimServiceIntegrationTest {
 
     @Test
     void recoversExpiredAndExhausted() {
+        double retryBefore = recoveryCount("retryable");
+        double failedBefore = recoveryCount("failed");
         LocalDateTime now = groupingWorkRepository.currentDatabaseTime();
         UUID expired = newWork("PROCESSING", 1, null, now.minusMinutes(6), null, null);
         UUID active = newWork("PROCESSING", 1, null, now.minusMinutes(4), null, null);
@@ -210,10 +214,14 @@ class GroupingWorkClaimServiceIntegrationTest {
         assertEquals("FAILED", status(exhausted));
         assertEquals("GROUPING_RETRY_EXHAUSTED",
                 groupingWorkRepository.findById(exhausted).orElseThrow().getFailureCode());
+        assertEquals(retryBefore + 1, recoveryCount("retryable"));
+        assertEquals(failedBefore + 1, recoveryCount("failed"));
     }
 
     @Test
     void recoveryRollbackOnFail() {
+        double retryBefore = recoveryCount("retryable");
+        double failedBefore = recoveryCount("failed");
         LocalDateTime now = groupingWorkRepository.currentDatabaseTime();
         UUID eventId = newWork("PROCESSING", 1, null, now.minusMinutes(6), null, null);
         doAnswer(invocation -> {
@@ -233,6 +241,13 @@ class GroupingWorkClaimServiceIntegrationTest {
         assertEquals(1, unchanged.getAttemptCount());
         assertNotNull(unchanged.getProcessingStartedAt());
         assertNull(unchanged.getNextAttemptAt());
+        assertEquals(retryBefore, recoveryCount("retryable"));
+        assertEquals(failedBefore, recoveryCount("failed"));
+    }
+
+    private double recoveryCount(String result) {
+        return meterRegistry.get("failureintel.grouping.lease.recovered")
+                .tag("result", result).counter().count();
     }
 
     @Test

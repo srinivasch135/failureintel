@@ -3,6 +3,8 @@ package com.failureintel.ingestion.application.service;
 import com.failureintel.ingestion.application.config.GroupingWorkerProperties;
 import com.failureintel.infrastructure.persistence.incidentgrouping.entity.GroupingWorkEntity;
 import com.failureintel.infrastructure.persistence.incidentgrouping.repository.GroupingWorkRepository;
+import com.failureintel.infrastructure.monitoring.metrics.GroupingWorkMetrics;
+import com.failureintel.infrastructure.monitoring.metrics.GroupingWorkMetrics.RecoveryResult;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
@@ -17,14 +19,17 @@ public class GroupingWorkRecoveryService {
     private final GroupingWorkRepository repository;
     private final GroupingRetryPolicy retryPolicy;
     private final Duration leaseTimeout;
+    private final GroupingWorkMetrics groupingMetrics;
 
     public GroupingWorkRecoveryService(
             GroupingWorkRepository repository,
             GroupingRetryPolicy retryPolicy,
-            GroupingWorkerProperties workerProperties) {
+            GroupingWorkerProperties workerProperties,
+            GroupingWorkMetrics groupingMetrics) {
         this.repository = repository;
         this.retryPolicy = retryPolicy;
         this.leaseTimeout = workerProperties.processingLeaseTimeout();
+        this.groupingMetrics = groupingMetrics;
     }
 
     @Transactional(propagation = Propagation.REQUIRES_NEW)
@@ -36,6 +41,8 @@ public class GroupingWorkRecoveryService {
         LocalDateTime now = repository.currentDatabaseTime();
         List<GroupingWorkEntity> expired = repository.lockExpiredProcessingClaims(
                 now.minus(leaseTimeout), batchSize);
+        long exhaustedCount = expired.stream()
+                .filter(work -> work.getAttemptCount() >= retryPolicy.maxAttempts()).count();
         for (GroupingWorkEntity work : expired) {
             int attempt = work.getAttemptCount();
             boolean exhausted = attempt >= retryPolicy.maxAttempts();
@@ -43,6 +50,8 @@ public class GroupingWorkRecoveryService {
                     : now.plus(retryPolicy.delayAfter(attempt));
             work.recoverExpiredLease(retryAt, exhausted);
         }
+        groupingMetrics.recordLeaseRecovered(RecoveryResult.RETRYABLE, expired.size() - exhaustedCount);
+        groupingMetrics.recordLeaseRecovered(RecoveryResult.FAILED, exhaustedCount);
         return expired.size();
     }
 }

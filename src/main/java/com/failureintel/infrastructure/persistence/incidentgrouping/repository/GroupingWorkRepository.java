@@ -13,6 +13,30 @@ import java.util.UUID;
 
 public interface GroupingWorkRepository extends JpaRepository<GroupingWorkEntity, UUID> {
 
+    @Query(value = "SELECT COUNT(*) FROM grouping_work WHERE status = :status", nativeQuery = true)
+    long countWorkByStatus(@Param("status") String status);
+
+    @Query(value = "SELECT COUNT(*) FROM grouping_work WHERE status IN ('PENDING', 'PROCESSING', 'RETRYABLE')", nativeQuery = true)
+    long countUnfinishedWork();
+
+    @Query(value = "SELECT COUNT(*) FROM grouping_work WHERE (status = 'PENDING' AND attempt_count < :maxAttempts) OR (status = 'RETRYABLE' AND next_attempt_at <= (clock_timestamp() AT TIME ZONE 'UTC') AND attempt_count < :maxAttempts)", nativeQuery = true)
+    long countClaimableWork(@Param("maxAttempts") int maxAttempts);
+
+    @Query(value = "SELECT COUNT(*) FROM grouping_work WHERE status = 'COMPLETED' AND terminal_outcome = :outcome", nativeQuery = true)
+    long countCompletedOutcome(@Param("outcome") String outcome);
+
+    @Query(value = "SELECT COUNT(*) FROM grouping_work WHERE status = 'COMPLETED' AND unassigned_reason = :reason", nativeQuery = true)
+    long countUnassignedReason(@Param("reason") String reason);
+
+    @Query(value = "SELECT COUNT(*) FROM grouping_work WHERE status = 'FAILED' AND failure_code = 'GROUPING_RETRY_EXHAUSTED'", nativeQuery = true)
+    long countRetryExhausted();
+
+    @Query(value = "SELECT COUNT(*) FROM grouping_work WHERE status = 'FAILED' AND failure_code IS DISTINCT FROM 'GROUPING_RETRY_EXHAUSTED'", nativeQuery = true)
+    long countPermanentFailures();
+
+    @Query(value = "SELECT COUNT(*) FROM grouping_work WHERE status = 'COMPLETED' AND unassigned_reason = 'HISTORICAL_CORRECTION_EXPIRED'", nativeQuery = true)
+    long countExpiredCorrections();
+
     @Modifying
     @Query(value = "INSERT INTO grouping_work (event_id) VALUES (:eventId) "
             + "ON CONFLICT (event_id) DO NOTHING", nativeQuery = true)

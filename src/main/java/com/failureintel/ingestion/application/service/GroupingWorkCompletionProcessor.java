@@ -13,6 +13,7 @@ import com.failureintel.infrastructure.persistence.incidentgrouping.entity.Incid
 import com.failureintel.infrastructure.persistence.incidentgrouping.repository.GroupingWorkRepository;
 import com.failureintel.infrastructure.persistence.incidentgrouping.repository.IncidentMembershipRepository;
 import com.failureintel.infrastructure.persistence.incidentgrouping.repository.IncidentRepository;
+import com.failureintel.infrastructure.monitoring.metrics.GroupingWorkMetrics;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 
@@ -31,6 +32,7 @@ public class GroupingWorkCompletionProcessor {
     private final IncidentRepository incidentRepository;
     private final JdbcTemplate jdbcTemplate;
     private final HistoricalCorrectionProperties correctionProperties;
+    private final GroupingWorkMetrics groupingMetrics;
     private final IncidentGroupingEligibilityEvaluator eligibilityEvaluator =
             new IncidentGroupingEligibilityEvaluator();
 
@@ -40,13 +42,15 @@ public class GroupingWorkCompletionProcessor {
             IncidentMembershipRepository membershipRepository,
             IncidentRepository incidentRepository,
             JdbcTemplate jdbcTemplate,
-            HistoricalCorrectionProperties correctionProperties) {
+            HistoricalCorrectionProperties correctionProperties,
+            GroupingWorkMetrics groupingMetrics) {
         this.coordinationService = coordinationService;
         this.groupingWorkRepository = groupingWorkRepository;
         this.membershipRepository = membershipRepository;
         this.incidentRepository = incidentRepository;
         this.jdbcTemplate = jdbcTemplate;
         this.correctionProperties = correctionProperties;
+        this.groupingMetrics = groupingMetrics;
     }
 
     public void process(ClaimedGroupingWork claim) {
@@ -76,6 +80,7 @@ public class GroupingWorkCompletionProcessor {
             Instant occurredAt = snapshot.event().getOccurredAt();
             LocalDateTime occurrence = toDatabaseTime(occurredAt);
             IncidentEntity incident;
+            boolean historicalCorrection = decision.outcome() == Outcome.HISTORICAL_CORRECTION;
             if (decision.outcome() == Outcome.CREATE_INCIDENT) {
                 CanonicalGroupingSignature signature = snapshot.signature().orElseThrow(
                         () -> new IllegalStateException("Incident creation requires a canonical signature"));
@@ -110,6 +115,9 @@ public class GroupingWorkCompletionProcessor {
 
             membershipRepository.saveAndFlush(new IncidentMembershipEntity(claim.eventId(), incident.getIncidentId()));
             work.completeAssociated();
+            if (historicalCorrection) {
+                groupingMetrics.recordCorrectionAccepted();
+            }
         });
     }
 
